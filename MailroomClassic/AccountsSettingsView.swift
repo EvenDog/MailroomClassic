@@ -1,10 +1,12 @@
 // The Settings window (Mailroom Classic → Settings…, or ⌘,): lists your
 // accounts and has a form to add a new one. The form changes with the account
 // type: Gmail and Office 365 fill in their own server settings, and Office 365
-// signs in through Microsoft's sign-in page instead of a password.
+// signs in through Microsoft's sign-in page instead of a password. The form
+// can also be filled in from a provider's configuration profile (.mobileconfig).
 
 import AuthenticationServices
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct AccountsSettingsView: View {
     // `@Environment` reads values the app hands down to every view: here, the
@@ -26,6 +28,9 @@ struct AccountsSettingsView: View {
 
     @State private var isWorking = false
     @State private var errorMessage: String?
+    @State private var isChoosingProfile = false
+    @State private var importMessage: String?      // e.g. "Filled in from profile…"
+    @State private var importWarning: String?      // e.g. the server name doesn't exist
 
     private var formIsComplete: Bool {
         let required: [String] = switch provider {
@@ -60,6 +65,23 @@ struct AccountsSettingsView: View {
             }
 
             Section("Add an Account") {
+                HStack {
+                    Text("Have a setup file from your email provider?")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Import Profile…") { isChoosingProfile = true }
+                }
+                if let importMessage {
+                    Text(importMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if let importWarning {
+                    Label(importWarning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+
                 Picker("Account type", selection: $provider) {
                     ForEach(MailProvider.allCases) { provider in
                         Text(provider.label).tag(provider)
@@ -110,6 +132,47 @@ struct AccountsSettingsView: View {
         .formStyle(.grouped)
         .frame(width: 540)
         .fixedSize(horizontal: false, vertical: true)
+        // The standard "choose a file" window, limited to configuration profiles.
+        .fileImporter(isPresented: $isChoosingProfile, allowedContentTypes: [Self.profileType]) { result in
+            if case .success(let url) = result {
+                Task { await importProfile(from: url) }
+            }
+        }
+    }
+
+    // The file type for ".mobileconfig" files (falls back to "any data" if macOS doesn't know it).
+    private static let profileType = UTType(filenameExtension: "mobileconfig") ?? .data
+
+    // Fills the form from a profile, then warns if its server name can't be found.
+    private func importProfile(from url: URL) async {
+        errorMessage = nil
+        importWarning = nil
+        do {
+            let accounts = try ProfileImporter.accounts(in: url)
+            let imported = accounts[0]
+            provider = imported.provider
+            senderName = imported.senderName
+            emailAddress = imported.emailAddress
+            displayName = imported.displayName
+            imapHost = imported.imapHost
+            imapPort = imported.imapPort
+            // Same server for both? Leave Outgoing blank ("same as incoming"), so fixing one fixes both.
+            smtpHost = imported.smtpHost.caseInsensitiveCompare(imported.imapHost) == .orderedSame ? "" : imported.smtpHost
+            smtpPort = imported.smtpPort
+            password = imported.password ?? ""
+
+            var message = "Filled in from \(url.lastPathComponent)."
+            if imported.password == nil { message += " Enter your password, then click Test & Add Account." }
+            if accounts.count > 1 { message += " (The profile has \(accounts.count) accounts; this is the first.)" }
+            importMessage = message
+
+            if imported.provider == .other, !(await ProfileImporter.serverExists(imported.imapHost)) {
+                importWarning = "The server “\(imported.imapHost)” from this profile can't be found on the internet, so it's probably wrong. Ask your email provider for the correct server name (for MXroute, it's in your welcome email, like xxx.mxrouting.net)."
+            }
+        } catch {
+            importMessage = nil
+            errorMessage = "Couldn't import the profile: \(error.localizedDescription)"
+        }
     }
 
     // Builds the account from the form, using the known server settings for Gmail and Office 365.
@@ -159,6 +222,8 @@ struct AccountsSettingsView: View {
     }
 
     private func clearForm() {
+        importMessage = nil
+        importWarning = nil
         senderName = ""
         emailAddress = ""
         displayName = ""

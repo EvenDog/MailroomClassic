@@ -43,9 +43,11 @@ It works with:
 
 Open **Mailroom Classic → Settings…** (⌘,) and choose an account type.
 
+**Have a setup file?** Many providers (MXroute included) offer an Apple configuration profile (a `.mobileconfig` file). Click **Import Profile…** and the form fills itself in; usually you only need to type your password. If the profile names a server that doesn't exist, Mailroom Classic warns you.
+
 ### Other (IMAP/SMTP), e.g. MXroute
 
-Enter your incoming (IMAP) server, which is usually port 993, and your password. The outgoing (SMTP) server defaults to the same host on port 465. For MXroute, the server name (something like `xxx.mxrouting.net`) is in your welcome email or control panel.
+Enter your incoming (IMAP) server, which is usually port 993, and your password. The outgoing (SMTP) server defaults to the same host on port 465. For MXroute, use your MXroute server name (something like `xxx.mxrouting.net`), which is in your welcome email or control panel. A name like `mail.yourdomain.com` only works if you've set that up in your domain's DNS.
 
 ### Gmail
 
