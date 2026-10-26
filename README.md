@@ -17,6 +17,10 @@ It works with:
   - Pictures from the internet are blocked until you click **Download Pictures**, because senders use them to track when you read their mail
 - Attachments: click to open, right-click to save, and attach files when you write. Forwarding keeps the original attachments.
 - New Email, Reply, Reply All and Forward, with Outlook-style quoting of the original message
+- Formatted writing (bold, italic, underline, fonts, colors) from the **Format** menu, sent as HTML with a plain-text copy
+- Save Draft (⌘S) to your Drafts folder, and pick up where you left off with **Edit Draft**
+- Search the current folder (sender, subject and message text), searched on the server
+- **Show Older Messages** loads 50 more at a time
 - Mark as read/unread (⇧⌘U), flag (⇧⌘L), and Delete. Delete moves mail to Trash; deleting from Trash removes it for good, after asking.
 - Send/Receive button and a status bar
 - Keeps one connection open per account, so clicking around is quick
@@ -74,9 +78,8 @@ Microsoft only allows OAuth ("Sign in with Microsoft") for IMAP and SMTP. That m
 
 ## Current limitations
 
-- Shows the newest 50 messages per folder
-- New emails are written as plain text (received HTML emails display fully)
-- No search or saved drafts yet
+- Search looks in one folder at a time
+- Closing a compose window doesn't ask whether to save the draft first
 - Opening a message downloads its attachments too, so very large attachments make it slow to open
 
 ## App icon

@@ -1,7 +1,7 @@
-// The compose window, used for New Email, Reply, Reply All and Forward:
-// From / To / Cc / Subject fields on top, attached files under them, the
-// message body below, and Send and Attach buttons in the toolbar. The window
-// closes itself once the email is sent.
+// The compose window, used for New Email, Reply, Reply All, Forward and editing
+// drafts: From / To / Cc / Subject fields on top, attached files under them, a
+// formatted message body below, and Send, Save Draft and Attach buttons in the
+// toolbar. The window closes itself once the email is sent.
 
 import SwiftUI
 
@@ -9,13 +9,23 @@ struct ComposeView: View {
     @Environment(MailStore.self) private var store
     @Environment(\.dismiss) private var dismiss   // closes this window
 
-    @State var draft: ComposeDraft
-    @State private var isSending = false
+    @State private var draft: ComposeDraft
+    @State private var messageText: NSAttributedString   // the message body, with formatting
+    @State private var isWorking = false
     @State private var isChoosingAttachments = false
     @State private var errorMessage: String?
+    @State private var draftSavedAt: Date?
+
+    // A custom init so the editor can start with the draft's text.
+    // `_draft` and `_messageText` are the @State wrappers themselves, which is how you
+    // give @State properties their starting values from an init.
+    init(draft: ComposeDraft) {
+        _draft = State(initialValue: draft)
+        _messageText = State(initialValue: RichTextEditor.initialText(html: draft.htmlBody, plain: draft.body))
+    }
 
     private var canSend: Bool {
-        !isSending && draft.accountID != nil && !draft.to.trimmingCharacters(in: .whitespaces).isEmpty
+        !isWorking && draft.accountID != nil && !draft.to.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     var body: some View {
@@ -44,13 +54,16 @@ struct ComposeView: View {
                     .foregroundStyle(.red)
                     .padding(.horizontal)
                     .padding(.bottom, 8)
+            } else if let draftSavedAt {
+                Text("Draft saved at \(draftSavedAt.formatted(date: .omitted, time: .shortened))")
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
             }
 
             Divider()
 
-            TextEditor(text: $draft.body)
-                .font(.body)
-                .padding(8)
+            RichTextEditor(text: $messageText)
         }
         .frame(minWidth: 560, minHeight: 420)
         .navigationTitle(draft.subject.isEmpty ? "Untitled Message" : draft.subject)
@@ -59,11 +72,17 @@ struct ComposeView: View {
                 Button("Send", systemImage: "paperplane") {
                     Task { await send() }
                 }
-                .help("Send")
-                .keyboardShortcut(.return, modifiers: .command)   // ⌘Return sends
+                .help("Send (⌘Return)")
+                .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!canSend)
             }
-            ToolbarItem {
+            ToolbarItemGroup {
+                Button("Save Draft", systemImage: "square.and.arrow.down") {
+                    Task { await saveDraft() }
+                }
+                .help("Save Draft (⌘S)")
+                .keyboardShortcut("s")
+                .disabled(isWorking || draft.accountID == nil)
                 Button("Attach File", systemImage: "paperclip") {
                     isChoosingAttachments = true
                 }
@@ -109,15 +128,35 @@ struct ComposeView: View {
         .padding(.bottom, 8)
     }
 
+    // Copies the editor's text into the draft, as plain text and as HTML.
+    private func captureBody() {
+        draft.body = messageText.string
+        draft.htmlBody = RichTextEditor.html(from: messageText)
+    }
+
     private func send() async {
-        isSending = true
+        isWorking = true
         errorMessage = nil
+        captureBody()
         do {
             try await store.send(draft)
             dismiss()
         } catch {
             errorMessage = "Couldn't send: \(error.localizedDescription)"
         }
-        isSending = false
+        isWorking = false
+    }
+
+    private func saveDraft() async {
+        isWorking = true
+        errorMessage = nil
+        captureBody()
+        do {
+            draft.savedDraftUID = try await store.saveDraft(draft)
+            draftSavedAt = Date()
+        } catch {
+            errorMessage = "Couldn't save the draft: \(error.localizedDescription)"
+        }
+        isWorking = false
     }
 }

@@ -15,6 +15,17 @@ final class MailStore {
     private(set) var messages: [MailMessage] = []
     private(set) var openMessage: OpenMessage?   // the full contents of the message in the reading pane
     private(set) var statusText = "Ready"
+    private(set) var isShowingSearchResults = false
+
+    // Which folder `messages` came from, how many we asked for, and how many the folder holds.
+    private var shownFolderID: MailFolder.ID?
+    private var messageLimit = IMAPService.pageSize
+    private var totalMessageCount = 0
+
+    // True when the folder has messages older than the ones on screen.
+    var hasOlderMessages: Bool {
+        !isShowingSearchResults && messages.count < totalMessageCount
+    }
 
     // Every folder from every account, in one list.
     var allFolders: [MailFolder] {
@@ -64,15 +75,45 @@ final class MailStore {
         }
     }
 
-    // Shows the newest messages in a folder.
+    // Shows the newest messages in a folder (the first page of them).
     func loadMessages(in folder: MailFolder) async {
-        messages = []
+        if shownFolderID != folder.id {
+            messages = []
+            messageLimit = IMAPService.pageSize
+        }
+        shownFolderID = folder.id
+        isShowingSearchResults = false
+        await fetchMessages(in: folder, activity: "Loading \(folder.displayName)…")
+    }
+
+    // "Show older messages": loads another page further back in time.
+    func loadOlderMessages(in folder: MailFolder) async {
+        messageLimit += IMAPService.pageSize
+        await fetchMessages(in: folder, activity: "Loading older messages…")
+    }
+
+    // Replaces the message list with the server's search results for `query`.
+    func search(_ query: String, in folder: MailFolder) async {
         guard let account = account(for: folder) else { return }
-        await reportingErrors("Loading \(folder.displayName)…") {
-            let loaded = try await IMAPService.fetchLatestMessages(for: account, folderPath: folder.path)
+        await reportingErrors("Searching \(folder.displayName)…") {
+            let results = try await IMAPService.searchMessages(for: account, folderPath: folder.path, query: query)
+            guard shownFolderID == folder.id else { return }   // you switched folders meanwhile
+            messages = results.sorted { $0.dateReceived > $1.dateReceived }
+            isShowingSearchResults = true
+        }
+        if isShowingSearchResults {
+            statusText = messages.count == 1 ? "1 message found" : "\(messages.count) messages found"
+        }
+    }
+
+    private func fetchMessages(in folder: MailFolder, activity: String) async {
+        guard let account = account(for: folder) else { return }
+        await reportingErrors(activity) {
+            let page = try await IMAPService.fetchLatestMessages(for: account, folderPath: folder.path, limit: messageLimit)
             // If you clicked another folder while this was loading, throw this result away.
-            guard !Task.isCancelled else { return }
-            messages = loaded.sorted { $0.dateReceived > $1.dateReceived }
+            guard !Task.isCancelled, shownFolderID == folder.id else { return }
+            messages = page.messages.sorted { $0.dateReceived > $1.dateReceived }
+            totalMessageCount = page.totalCount
         }
     }
 
@@ -139,15 +180,75 @@ final class MailStore {
     // Sends an email from a compose window. Throws if it couldn't be sent, so
     // the compose window can stay open and show why.
     func send(_ draft: ComposeDraft) async throws {
+        let account = try sendingAccount(for: draft)
+        let email = try makeEmail(from: draft, account: account)
+
+        statusText = "Sending…"
+        try await SMTPService.send(email, from: account)
+        statusText = "Sent"
+
+        // It's sent, so the saved draft (if any) is no longer needed.
+        if let draftUID = draft.savedDraftUID, let draftsFolder = folder(.drafts, in: account) {
+            try? await IMAPService.deletePermanently(uid: draftUID, in: draftsFolder.path, account: account)
+        }
+
+        // The email is sent at this point; failing to save a copy shouldn't count as a send failure.
+        if !account.provider.savesSentMailAutomatically,
+           let sentFolder = folder(.sent, in: account) {
+            do {
+                try await IMAPService.saveCopy(of: email, to: sentFolder.path, account: account)
+            } catch {
+                statusText = "Sent, but couldn't save a copy to \(sentFolder.displayName): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // Saves a compose window's contents to the Drafts folder, replacing the
+    // previously saved version. Returns the new draft's server ID.
+    func saveDraft(_ draft: ComposeDraft) async throws -> UInt32? {
+        let account = try sendingAccount(for: draft)
+        guard let draftsFolder = folder(.drafts, in: account) else {
+            throw MailError(message: "This account doesn't have a Drafts folder.")
+        }
+        let email = try makeEmail(from: draft, account: account)
+        let newUID = try await IMAPService.saveDraft(email, to: draftsFolder.path, account: account)
+        if let oldUID = draft.savedDraftUID {
+            try? await IMAPService.deletePermanently(uid: oldUID, in: draftsFolder.path, account: account)
+        }
+        // If you're looking at the Drafts folder, refresh it so the change shows.
+        if shownFolderID == draftsFolder.id {
+            await loadMessages(in: draftsFolder)
+        }
+        return newUID
+    }
+
+    // MARK: - Helpers
+
+    private func account(for folder: MailFolder) -> AccountSettings? {
+        accounts.first { $0.id == folder.accountID }
+    }
+
+    // The first folder with a given role (Sent, Drafts…) in an account.
+    private func folder(_ role: FolderRole, in account: AccountSettings) -> MailFolder? {
+        foldersByAccount[account.id]?.first { $0.role == role }
+    }
+
+    private func sendingAccount(for draft: ComposeDraft) throws -> AccountSettings {
         guard let account = accounts.first(where: { $0.id == draft.accountID }) else {
             throw MailError(message: "Choose an account to send from.")
         }
+        return account
+    }
+
+    // Turns a compose window's contents into SwiftMail's Email, ready to send or save.
+    private func makeEmail(from draft: ComposeDraft, account: AccountSettings) throws -> Email {
         var email = Email(
             sender: EmailAddress(name: account.senderName, address: account.emailAddress),
             recipients: try Self.parseAddresses(draft.to),
             ccRecipients: try Self.parseAddresses(draft.cc),
             subject: draft.subject,
             textBody: draft.body,
+            htmlBody: draft.htmlBody,
             // `Attachment(fileURL:)` reads each file and works out its type from the extension.
             attachments: try draft.attachmentURLs.map { try Attachment(fileURL: $0) }
         )
@@ -160,26 +261,7 @@ final class MailStore {
                 "References": draft.references.joined(separator: " "),
             ]
         }
-
-        statusText = "Sending…"
-        try await SMTPService.send(email, from: account)
-        statusText = "Sent"
-
-        // The email is sent at this point; failing to save a copy shouldn't count as a send failure.
-        if !account.provider.savesSentMailAutomatically,
-           let sentFolder = foldersByAccount[account.id]?.first(where: { $0.role == .sent }) {
-            do {
-                try await IMAPService.saveCopy(of: email, to: sentFolder.path, account: account)
-            } catch {
-                statusText = "Sent, but couldn't save a copy to \(sentFolder.displayName): \(error.localizedDescription)"
-            }
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func account(for folder: MailFolder) -> AccountSettings? {
-        accounts.first { $0.id == folder.accountID }
+        return email
     }
 
     // Changes our copy of a message (e.g. bold → not bold) without asking the server again.

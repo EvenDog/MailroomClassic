@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var selectedMessageID: MailMessage.ID?
     @State private var isConfirmingPermanentDelete = false
     @State private var messageToDeletePermanently: MailMessage?
+    @State private var searchText = ""
 
     private var selectedFolder: MailFolder? {
         store.allFolders.first { $0.id == selectedFolderID }
@@ -25,6 +26,10 @@ struct ContentView: View {
 
     private var selectedAccount: AccountSettings? {
         store.accounts.first { $0.id == selectedFolder?.accountID }
+    }
+
+    private var folderCount: Int {
+        store.allFolders.count
     }
 
     // Reply and Forward wait until the body has downloaded, so it can be quoted.
@@ -39,28 +44,25 @@ struct ContentView: View {
             FolderSidebarView(selectedFolderID: $selectedFolderID)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         } content: {
-            MessageListView(messages: store.messages, selectedMessageID: $selectedMessageID) { action, message in
-                switch action {
-                case .toggleRead: toggleRead(message)
-                case .toggleFlag: toggleFlag(message)
-                case .delete: requestDelete(message)
-                }
-            }
-            .navigationSplitViewColumnWidth(min: 300, ideal: 450)
+            messageListColumn
+                .navigationSplitViewColumnWidth(min: 300, ideal: 450)
         } detail: {
-            if store.accounts.isEmpty {
-                ContentUnavailableView {
-                    Label("No Accounts", systemImage: "person.crop.circle.badge.plus")
-                } description: {
-                    Text("Add an email account to get started.")
-                } actions: {
-                    SettingsLink { Text("Add Account…") }   // opens the Settings window
-                }
-            } else {
-                ReadingPaneView(message: selectedMessage, openMessage: store.openMessage)
-            }
+            readingPaneColumn
         }
         .navigationTitle(selectedFolder?.displayName ?? "Mailroom Classic")
+        // A search box in the toolbar. Pressing Return asks the server to search this folder.
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search this folder")
+        .onSubmit(of: .search) {
+            guard let folder = selectedFolder, !searchText.isEmpty else { return }
+            selectedMessageID = nil
+            Task { await store.search(searchText, in: folder) }
+        }
+        .onChange(of: searchText) {
+            // Clearing the search box (or clicking its ✕) goes back to the normal list.
+            if searchText.isEmpty, store.isShowingSearchResults, let folder = selectedFolder {
+                Task { await store.loadMessages(in: folder) }
+            }
+        }
         // A status bar along the bottom of the window, like classic Outlook.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack {
@@ -83,6 +85,7 @@ struct ContentView: View {
         // cancels the previous run, so clicking quickly between folders is safe.
         .task(id: selectedFolderID) {
             selectedMessageID = nil
+            searchText = ""
             guard let folder = selectedFolder else { return }
             await store.loadMessages(in: folder)
         }
@@ -94,7 +97,7 @@ struct ContentView: View {
             await store.open(message, in: folder)
         }
         // When an account is added in Settings, select its Inbox if nothing is selected yet.
-        .onChange(of: store.allFolders.count) {
+        .onChange(of: folderCount) {
             selectFirstInboxIfNeeded()
         }
         .toolbar {
@@ -165,6 +168,44 @@ struct ContentView: View {
         }
     }
 
+    // The middle column: the message list, plus "Show Older Messages" when there are more.
+    private var messageListColumn: some View {
+        VStack(spacing: 0) {
+            MessageListView(messages: store.messages, selectedMessageID: $selectedMessageID) { action, message in
+                switch action {
+                case .toggleRead: toggleRead(message)
+                case .toggleFlag: toggleFlag(message)
+                case .delete: requestDelete(message)
+                }
+            }
+            if store.hasOlderMessages, let folder = selectedFolder {
+                Button("Show Older Messages") {
+                    Task { await store.loadOlderMessages(in: folder) }
+                }
+                .buttonStyle(.link)
+                .padding(6)
+            }
+        }
+    }
+
+    // The right column: the reading pane, or a welcome message when there are no accounts yet.
+    @ViewBuilder   // lets this property return different kinds of views from an if/else
+    private var readingPaneColumn: some View {
+        if store.accounts.isEmpty {
+            ContentUnavailableView {
+                Label("No Accounts", systemImage: "person.crop.circle.badge.plus")
+            } description: {
+                Text("Add an email account to get started.")
+            } actions: {
+                SettingsLink { Text("Add Account…") }   // opens the Settings window
+            }
+        } else {
+            // Only drafts get an "Edit Draft" button.
+            let editAction: (() -> Void)? = selectedFolder?.role == .drafts ? { editDraft() } : nil
+            ReadingPaneView(message: selectedMessage, openMessage: store.openMessage, editDraft: editAction)
+        }
+    }
+
     // Opens a compose window pre-filled as a reply to the selected message.
     private func reply(replyAll: Bool) {
         guard let message = selectedMessage, let account = selectedAccount else { return }
@@ -181,6 +222,13 @@ struct ContentView: View {
         let attachmentURLs = contents.attachments.compactMap { try? AttachmentFiles.saveToTemporaryFolder($0) }
         let draft = ComposeDraft.forward(message, body: contents.plainText, attachmentURLs: attachmentURLs, account: account)
         openWindow(id: "compose", value: draft)
+    }
+
+    // Re-opens the selected draft in a compose window.
+    private func editDraft() {
+        guard let message = selectedMessage, let account = selectedAccount, let contents = store.openMessage else { return }
+        let attachmentURLs = contents.attachments.compactMap { try? AttachmentFiles.saveToTemporaryFolder($0) }
+        openWindow(id: "compose", value: ComposeDraft.editing(message, contents: contents, attachmentURLs: attachmentURLs, account: account))
     }
 
     private func toggleRead(_ message: MailMessage) {
@@ -214,7 +262,7 @@ struct ContentView: View {
     // Reloads folders and unread counts, then the open folder's message list.
     private func sendReceive() async {
         await store.refreshAllFolders()
-        if let folder = selectedFolder {
+        if let folder = selectedFolder, !store.isShowingSearchResults {
             await store.loadMessages(in: folder)
         }
     }

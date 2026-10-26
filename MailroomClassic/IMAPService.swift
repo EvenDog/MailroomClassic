@@ -6,8 +6,8 @@ import Foundation
 import SwiftMail
 
 enum IMAPService {
-    // How many of the newest messages to download per folder.
-    static let messagesPerFolder = 50
+    // How many messages to download at a time (more load with "Show older messages").
+    static let pageSize = 50
 
     // One open connection per account, created the first time it's needed.
     private static var connections: [UUID: AccountConnection] = [:]
@@ -43,13 +43,31 @@ enum IMAPService {
         }
     }
 
-    // Returns summaries (sender, subject, date, read/unread) of the newest messages in a folder.
-    static func fetchLatestMessages(for account: AccountSettings, folderPath: String) async throws -> [MailMessage] {
+    // Returns summaries (sender, subject, date, read/unread) of the newest `limit`
+    // messages in a folder, plus how many messages the folder has in total.
+    static func fetchLatestMessages(for account: AccountSettings, folderPath: String, limit: Int) async throws -> (messages: [MailMessage], totalCount: Int) {
         try await connection(for: account).run { server in
             let selection = try await server.selectMailbox(folderPath)
-            guard let newest = selection.latest(messagesPerFolder) else { return [] }   // empty folder
+            guard let newest = selection.latest(limit) else { return ([], 0) }   // empty folder
             let infos = try await server.fetchMessageInfosBulk(using: newest)
-            return infos.compactMap { makeMailMessage(from: $0) }   // compactMap skips the nils
+            let messages = infos.compactMap { makeMailMessage(from: $0) }   // compactMap skips the nils
+            return (messages, selection.messageCount)
+        }
+    }
+
+    // Asks the server to search a folder (sender, subject and body text) and
+    // returns the newest matching messages.
+    static func searchMessages(for account: AccountSettings, folderPath: String, query: String) async throws -> [MailMessage] {
+        try await connection(for: account).run { server in
+            try await server.selectMailbox(folderPath)
+            // IMAP's TEXT search looks in the headers and the body.
+            let result: ExtendedSearchResult<UID> = try await server.extendedSearch(criteria: [.text(query)])
+            let matches = result.all?.toArray() ?? []
+            // Higher UIDs are newer messages, so keep the highest ones.
+            let newestMatches = matches.sorted { $0.value > $1.value }.prefix(pageSize)
+            guard !newestMatches.isEmpty else { return [] }
+            let infos = try await server.fetchMessageInfosBulk(using: UIDSet(Array(newestMatches)))
+            return infos.compactMap { makeMailMessage(from: $0) }
         }
     }
 
@@ -96,6 +114,15 @@ enum IMAPService {
     static func saveCopy(of email: Email, to folderPath: String, account: AccountSettings) async throws {
         try await connection(for: account).run { server in
             _ = try await server.append(email: email, to: folderPath, flags: [.seen])
+        }
+    }
+
+    // Saves an unfinished email into the Drafts folder and returns its new UID
+    // (so a later save can replace it), if the server reports one.
+    static func saveDraft(_ email: Email, to draftsPath: String, account: AccountSettings) async throws -> UInt32? {
+        try await connection(for: account).run { server in
+            let result = try await server.append(email: email, to: draftsPath, flags: [.draft, .seen])
+            return result.firstUID?.value
         }
     }
 

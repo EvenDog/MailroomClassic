@@ -11,10 +11,12 @@ struct ComposeDraft: Codable, Hashable {
     var to = ""
     var cc = ""
     var subject = ""
-    var body = ""
+    var body = ""              // plain text
+    var htmlBody: String?      // formatted version, if there is one (e.g. a saved draft being edited)
     var inReplyTo: String?     // Message-ID of the email being replied to (keeps conversations threaded)
     var references: [String] = []
     var attachmentURLs: [URL] = []   // files on disk to attach
+    var savedDraftUID: UInt32?       // if this draft is saved in the Drafts folder, its server ID
 }
 
 extension ComposeDraft {
@@ -54,6 +56,20 @@ extension ComposeDraft {
             subject: subject(message.subject, withPrefix: "FW:", unlessStartsWith: ["fw:", "fwd:"]),
             body: originalMessageBlock(message, body: body),
             attachmentURLs: attachmentURLs
+        )
+    }
+
+    // Re-opens a saved draft for editing. Saving or sending it again replaces the saved copy.
+    static func editing(_ message: MailMessage, contents: OpenMessage, attachmentURLs: [URL], account: AccountSettings) -> ComposeDraft {
+        ComposeDraft(
+            accountID: account.id,
+            to: addressList(message.toRecipients),
+            cc: addressList(message.ccRecipients),
+            subject: message.subject == "(No subject)" ? "" : message.subject,
+            body: contents.plainText,
+            htmlBody: contents.html,
+            attachmentURLs: attachmentURLs,
+            savedDraftUID: message.uid
         )
     }
 

@@ -9,6 +9,7 @@ struct ReadingPaneView: View {
     // and its contents may still be downloading.
     let message: MailMessage?
     let openMessage: OpenMessage?
+    let editDraft: (() -> Void)?   // set only when viewing the Drafts folder
 
     // Whether you clicked "Download Pictures" for this message. Resets for each new message.
     @State private var allowRemoteContent = false
@@ -53,6 +54,11 @@ struct ReadingPaneView: View {
                 if message.isFlagged {
                     Image(systemName: "flag.fill")
                         .foregroundStyle(.red)
+                }
+                Spacer()
+                if let editDraft {
+                    Button("Edit Draft", systemImage: "pencil", action: editDraft)
+                        .disabled(openMessage == nil)
                 }
             }
             Text(verbatim: "From: \(message.sender.formatted)")

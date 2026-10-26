@@ -21,6 +21,8 @@ struct MailroomClassicApp: App {
             CommandGroup(replacing: .newItem) {
                 NewEmailMenuItem()
             }
+            // Adds the standard Format menu: Bold ⌘B, Italic ⌘I, Underline ⌘U, Show Fonts ⌘T, Show Colors.
+            TextFormattingCommands()
         }
 
         // Compose windows. Each one is opened with a ComposeDraft (blank, or a pre-filled reply).
