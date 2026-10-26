@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000010 /* SwiftMail in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000011 /* SwiftMail */; };
+		A10000000000000000000013 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000014 /* GRDB */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000010 /* SwiftMail in Frameworks */,
+				A10000000000000000000013 /* GRDB in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +73,7 @@
 			name = MailroomClassic;
 			packageProductDependencies = (
 				A10000000000000000000011 /* SwiftMail */,
+				A10000000000000000000014 /* GRDB */,
 			);
 			productName = MailroomClassic;
 			productReference = A1000000000000000000000A /* MailroomClassic.app */;
@@ -102,6 +105,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A10000000000000000000012 /* XCRemoteSwiftPackageReference "SwiftMail" */,
+				A10000000000000000000015 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000002 /* Products */;
@@ -269,6 +273,14 @@
 				revision = 88c45cbd31b347b373f7c87e197be63eb95efbc2;
 			};
 		};
+		A10000000000000000000015 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.11.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -276,6 +288,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A10000000000000000000012 /* XCRemoteSwiftPackageReference "SwiftMail" */;
 			productName = SwiftMail;
+		};
+		A10000000000000000000014 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000015 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

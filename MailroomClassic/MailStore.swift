@@ -1,6 +1,8 @@
 // The app's shared state: the list of accounts, their folders, the messages
 // in the folder you're looking at, and the body of the open message. Views
 // read from it, and call its functions to add accounts, load, send or change mail.
+// Message lists come from the local copy on this Mac (MailCache), which is kept
+// up to date with the server in the background (MailSync).
 
 import Foundation
 import Observation
@@ -18,21 +20,35 @@ final class MailStore {
     private(set) var messages: [MailMessage] = []
     private(set) var openMessage: OpenMessage?   // the full contents of the message in the reading pane
     private(set) var statusText = "Ready"
+    // The last problem checking each account (e.g. a rejected password), shown in
+    // the sidebar under that account until a check works again.
+    private(set) var accountProblems: [UUID: String] = [:]
+    // Accounts being checked right now, so a second check doesn't start on top of
+    // one that's still running (which could announce the same new mail twice).
+    private var accountsBeingChecked: Set<UUID> = []
     private(set) var isShowingSearchResults = false
 
-    // Which folder (or All Inboxes) `messages` came from, how many we asked for
-    // from each folder, and how many messages those folders hold in total.
+    // Which sidebar row (a folder, or All Inboxes) `messages` shows, and the real folders behind it.
     private var shownFolderID: String?
-    private var messageLimit = IMAPService.pageSize
-    private var totalMessageCount = 0
+    private var shownFolders: [MailFolder] = []
+    // Messages older than the offline window, fetched from the server with
+    // "Show Older Messages" (they aren't saved on this Mac), and how many more
+    // older ones each shown folder still has on the server.
+    private var olderMessages: [MailMessage] = []
+    private var olderRemainingByFolder: [MailFolder.ID: Int] = [:]
+
+    // Folders being synced right now, so the same folder is never synced twice at once.
+    private var foldersBeingSynced: Set<MailFolder.ID> = []
+    private var backgroundSync: Task<Void, Never>?
+    private var lastFullSync: Date?
 
     // Attachments of the open message that are already downloaded, so opening one
     // twice doesn't download it twice. Emptied when another message is opened.
     private var downloadedAttachments: [MailAttachment.ID: Data] = [:]
 
-    // True when the folder has messages older than the ones on screen.
+    // True when the server has messages older than the ones on screen.
     var hasOlderMessages: Bool {
-        !isShowingSearchResults && messages.count < totalMessageCount
+        !isShowingSearchResults && olderRemainingByFolder.values.contains { $0 > 0 }
     }
 
     // Every folder from every account, in one list.
@@ -77,6 +93,10 @@ final class MailStore {
             try AccountStorage.saveSecret(newSecret, for: updated.id)
         }
         guard let index = accounts.firstIndex(where: { $0.id == updated.id }) else { return }
+        // A different server or mailbox means the saved copy belongs to something else.
+        if accounts[index].imapHost != updated.imapHost || accounts[index].emailAddress != updated.emailAddress {
+            try? await MailCache.forgetFolders(ofAccount: updated.id)
+        }
         accounts[index] = updated
         AccountStorage.saveAccounts(accounts)
         // The open connection still uses the old settings, so start a new one.
@@ -90,32 +110,59 @@ final class MailStore {
         MicrosoftOAuth.forgetCachedToken(for: account.id)
         accounts.removeAll { $0.id == account.id }
         foldersByAccount[account.id] = nil
+        accountProblems[account.id] = nil
         AccountStorage.saveAccounts(accounts)
+        Task { try? await MailCache.forgetFolders(ofAccount: account.id) }   // and its saved mail
     }
 
     // MARK: - Reading mail
 
-    // Reloads every account's folder list and unread counts ("Send/Receive").
+    // Reloads every account's folder list and unread counts ("Send/Receive"),
+    // then starts updating the local copy in the background.
     func refreshAllFolders() async {
         for account in accounts {
             await refreshFolders(for: account)
         }
+        startBackgroundSync()
     }
 
-    // Reloads one account's folders, and announces any new mail in its Inbox.
+    // Reloads one account's folders and their unread counts, and announces any new
+    // mail in its Inbox. The folder list appears first; the counts then arrive one
+    // folder at a time (Inbox first), each as its own small job, so opening a
+    // message in the meantime doesn't have to wait for every folder to be counted.
     func refreshFolders(for account: AccountSettings) async {
-        await reportingErrors("Checking \(account.displayName)…", server: account.imapHost) {
+        guard !accountsBeingChecked.contains(account.id) else { return }   // already being checked
+        accountsBeingChecked.insert(account.id)
+        defer { accountsBeingChecked.remove(account.id) }
+
+        accountProblems[account.id] = await reportingErrors("Checking \(account.displayName)…", server: account.imapHost) {
             let previousFolders = foldersByAccount[account.id] ?? []
-            let folders = try await IMAPService.fetchFolders(for: account)
+            var folders = try await IMAPService.fetchFolders(for: account)
+            // Forget saved mail of folders that were deleted or renamed on the server.
+            try? await MailCache.forgetFolders(ofAccount: account.id, keeping: folders.map(\.id))
+            // Until fresh counts arrive, show the ones from the last check.
+            for index in folders.indices {
+                if let previous = previousFolders.first(where: { $0.id == folders[index].id }) {
+                    folders[index].unreadCount = previous.unreadCount
+                    folders[index].uidNext = previous.uidNext
+                }
+            }
             foldersByAccount[account.id] = folders
 
-            // If an Inbox's "next message ID" went up since last time, new mail arrived.
-            // (On the first check there's nothing to compare with, so no alerts.)
-            for inbox in folders where inbox.role == .inbox {
-                guard let previous = previousFolders.first(where: { $0.id == inbox.id }),
-                      let oldNext = previous.uidNext, let newNext = inbox.uidNext, newNext > oldNext else { continue }
+            for folder in folders {   // already sorted Inbox first
+                // `try?`: if one folder can't be counted, keep its old count and carry on.
+                guard let counts = try? await IMAPService.fetchCounts(of: folder, account: account),
+                      let index = foldersByAccount[account.id]?.firstIndex(where: { $0.id == folder.id }) else { continue }
+                foldersByAccount[account.id]?[index].unreadCount = counts.unread
+                foldersByAccount[account.id]?[index].uidNext = counts.uidNext
+
+                // If the Inbox's "next message ID" went up since last time, new mail arrived.
+                // (On the first check there's nothing to compare with, so no alerts.)
+                guard folder.role == .inbox,
+                      let oldNext = previousFolders.first(where: { $0.id == folder.id })?.uidNext,
+                      let newNext = counts.uidNext, newNext > oldNext else { continue }
                 // `try?`: if fetching the details fails, skip the alert rather than failing the check.
-                let arrivals = (try? await IMAPService.fetchNewMessages(for: account, folderPath: inbox.path, firstNewUID: oldNext)) ?? []
+                let arrivals = (try? await IMAPService.fetchNewMessages(for: account, folderPath: folder.path, firstNewUID: oldNext)) ?? []
                 NewMailNotifier.announce(arrivals.filter { !$0.isRead }, account: account)
             }
         }
@@ -126,24 +173,103 @@ final class MailStore {
         await loadMessages(from: [folder], viewID: folder.id)
     }
 
-    // Shows the newest messages from one or more folders, mixed together newest
-    // first. Several folders means All Inboxes. `viewID` is the sidebar row being
-    // shown (a folder's ID, or MailFolder.allInboxesID).
+    // Shows the messages in one or more folders, mixed together newest first
+    // (several folders means All Inboxes). They appear straight away from the
+    // local copy, then each folder is synced with the server and the list updates.
+    // `viewID` is the sidebar row being shown (a folder's ID, or MailFolder.allInboxesID).
     func loadMessages(from folders: [MailFolder], viewID: String) async {
         if shownFolderID != viewID {
             messages = []
-            messageLimit = IMAPService.pageSize
+            olderMessages = []
+            olderRemainingByFolder = [:]
         }
         shownFolderID = viewID
+        shownFolders = folders
         isShowingSearchResults = false
-        let name = folders.count == 1 ? folders[0].displayName : "All Inboxes"
-        await fetchMessages(from: folders, viewID: viewID, activity: "Loading \(name)…")
+        await showSavedMessages()
+        for folder in folders {
+            await sync(folder)
+        }
     }
 
-    // "Show older messages": loads another page further back in time.
+    // "Show Older Messages": fetches the next page of messages older than the
+    // offline window from the server (they aren't kept on this Mac).
     func loadOlderMessages(from folders: [MailFolder], viewID: String) async {
-        messageLimit += IMAPService.pageSize
-        await fetchMessages(from: folders, viewID: viewID, activity: "Loading older messages…")
+        let foldersWithMore = folders.filter { (olderRemainingByFolder[$0.id] ?? 0) > 0 }
+        let fetched = await collectMessages(from: foldersWithMore, activity: "Loading older messages…") { account, folder in
+            let alreadyShown = olderMessages.filter { $0.folderID == folder.id }.count
+            return try await IMAPService.fetchOlderMessages(in: folder, before: OfflineWindow.startDate, skipping: alreadyShown,
+                                                            limit: IMAPService.pageSize, account: account)
+        }
+        guard let fetched, shownFolderID == viewID else { return }
+        for folder in foldersWithMore {
+            let count = fetched.filter { $0.folderID == folder.id }.count
+            // Fewer than a full page means that was the last of them.
+            olderRemainingByFolder[folder.id] = count < IMAPService.pageSize ? 0 : max(0, (olderRemainingByFolder[folder.id] ?? 0) - count)
+        }
+        olderMessages += fetched
+        await showSavedMessages()
+    }
+
+    // Puts the shown folders' saved messages on screen, plus any older ones
+    // fetched from the server, newest first.
+    private func showSavedMessages() async {
+        guard let viewID = shownFolderID else { return }
+        do {
+            let saved = try await MailCache.messages(inFolders: shownFolders.map(\.id))
+            guard shownFolderID == viewID, !isShowingSearchResults else { return }   // you moved on meanwhile
+            messages = (saved + olderMessages).sorted { $0.dateReceived > $1.dateReceived }
+        } catch {
+            statusText = "Error: Couldn't read the saved mail on this Mac (\(error.localizedDescription))."
+        }
+    }
+
+    // Brings one folder's local copy up to date with the server, refreshing the
+    // message list as changes arrive if that folder is on screen.
+    func sync(_ folder: MailFolder) async {
+        guard let account = account(for: folder), !foldersBeingSynced.contains(folder.id) else { return }
+        foldersBeingSynced.insert(folder.id)
+        defer { foldersBeingSynced.remove(folder.id) }
+
+        await reportingErrors("Updating \(folder.displayName)…", server: account.imapHost) {
+            let olderOnServer = try await MailSync.sync(folder, account: account) {
+                if self.isShowing(folder) { await self.showSavedMessages() }
+            }
+            if isShowing(folder) {
+                let alreadyShown = olderMessages.filter { $0.folderID == folder.id }.count
+                olderRemainingByFolder[folder.id] = max(0, olderOnServer - alreadyShown)
+            }
+        }
+    }
+
+    // Updates the local copy without waiting: every account's Inbox after each
+    // check, and every other folder too at least every 30 minutes. Accounts sync
+    // side by side; within one account it's one folder at a time, Inbox first.
+    func startBackgroundSync() {
+        guard backgroundSync == nil else { return }   // the last one is still going
+        let includeEveryFolder = lastFullSync.map { Date().timeIntervalSince($0) > 30 * 60 } ?? true
+        if includeEveryFolder { lastFullSync = Date() }
+        let foldersByAccount = accounts.map { account in
+            (self.foldersByAccount[account.id] ?? []).filter { includeEveryFolder || $0.role == .inbox }
+        }
+        backgroundSync = Task {
+            // A task group runs several pieces of work at the same time (here, one per account)
+            // and waits until they've all finished.
+            await withTaskGroup(of: Void.self) { group in
+                for folders in foldersByAccount {
+                    group.addTask {
+                        for folder in folders {
+                            await self.sync(folder)
+                        }
+                    }
+                }
+            }
+            backgroundSync = nil
+        }
+    }
+
+    private func isShowing(_ folder: MailFolder) -> Bool {
+        !isShowingSearchResults && shownFolders.contains { $0.id == folder.id }
     }
 
     // Replaces the message list with the server's search results for `query`.
@@ -158,21 +284,6 @@ final class MailStore {
         if statusText == "Ready" {   // don't hide an error about one of the accounts
             statusText = messages.count == 1 ? "1 message found" : "\(messages.count) messages found"
         }
-    }
-
-    private func fetchMessages(from folders: [MailFolder], viewID: String, activity: String) async {
-        var totalCount = 0
-        let limit = messageLimit
-        let fetched = await collectMessages(from: folders, activity: activity) { account, folder in
-            let page = try await IMAPService.fetchLatestMessages(for: account, folderPath: folder.path, limit: limit)
-            totalCount += page.totalCount
-            return page.messages
-        }
-        // If you clicked another folder while this was loading, throw this result away.
-        guard let fetched, !Task.isCancelled, shownFolderID == viewID else { return }
-        // With several folders, keep only the newest `limit` of them all.
-        messages = Array(fetched.sorted { $0.dateReceived > $1.dateReceived }.prefix(limit))
-        totalMessageCount = totalCount
     }
 
     // Runs `fetch` on each folder in turn and returns everything it found, while
@@ -223,6 +334,8 @@ final class MailStore {
             if !message.isRead {
                 updateLocally(message) { $0.isRead = true }
                 changeUnreadCount(of: folder, by: -1)
+                // `try?`: if the local copy can't be updated, the next sync corrects it.
+                try? await MailCache.setFlags({ $0.isRead = true }, for: [message])
             }
         }
     }
@@ -273,6 +386,7 @@ final class MailStore {
                 updateLocally(message) { $0.isRead = isRead }
             }
             changeUnreadCount(of: folder, by: isRead ? -changing.count : changing.count)
+            try? await MailCache.setFlags({ $0.isRead = isRead }, for: changing)   // the next sync corrects any failure
         }
     }
 
@@ -284,6 +398,7 @@ final class MailStore {
             for message in selected {
                 updateLocally(message) { $0.isFlagged = isFlagged }
             }
+            try? await MailCache.setFlags({ $0.isFlagged = isFlagged }, for: selected)   // the next sync corrects any failure
         }
     }
 
@@ -294,7 +409,7 @@ final class MailStore {
         if folder.role == .trash {
             await reportingErrors("Deleting…", server: account.imapHost) {
                 try await IMAPService.deletePermanently(uids: selected.map(\.uid), in: folder.path, account: account)
-                removeLocally(selected, from: folder)
+                await removeLocally(selected, from: folder)
             }
         } else if let trash = self.folder(.trash, in: account) {
             await moveMessages(selected, from: folder, to: trash)
@@ -312,7 +427,7 @@ final class MailStore {
         }
         await reportingErrors("Moving to \(destination.displayName)…", server: account.imapHost) {
             try await IMAPService.moveMessages(uids: selected.map(\.uid), from: folder.path, to: destination.path, account: account)
-            removeLocally(selected, from: folder)
+            await removeLocally(selected, from: folder)
             changeUnreadCount(of: destination, by: selected.filter { !$0.isRead }.count)
         }
     }
@@ -413,11 +528,13 @@ final class MailStore {
         }
     }
 
-    // Takes messages off the list on screen (after a move or delete).
-    private func removeLocally(_ removed: [MailMessage], from folder: MailFolder) {
+    // Takes messages off the list on screen and out of the local copy (after a move or delete).
+    private func removeLocally(_ removed: [MailMessage], from folder: MailFolder) async {
         let removedIDs = Set(removed.map(\.id))
         messages.removeAll { removedIDs.contains($0.id) }
+        olderMessages.removeAll { removedIDs.contains($0.id) }
         changeUnreadCount(of: folder, by: -removed.filter { !$0.isRead }.count)
+        try? await MailCache.remove(removed)   // the next sync corrects any failure
     }
 
     private func changeUnreadCount(of folder: MailFolder, by change: Int) {
@@ -464,7 +581,9 @@ final class MailStore {
     // Runs a piece of mail work while showing `activity` in the status bar.
     // If the work fails, shows a readable error there instead of crashing.
     // `server` names the server involved, for the error message.
-    private func reportingErrors(_ activity: String, server: String, work: () async throws -> Void) async {
+    // Returns the error message, or nil if it worked (`@discardableResult`: callers may ignore it).
+    @discardableResult
+    private func reportingErrors(_ activity: String, server: String, work: () async throws -> Void) async -> String? {
         statusText = activity
         do {
             try await work()
@@ -472,7 +591,10 @@ final class MailStore {
         } catch is CancellationError {
             // Cancelled because you clicked something else; not a real error.
         } catch {
-            statusText = "Error: \(FriendlyError.message(for: error, server: server))"
+            let message = FriendlyError.message(for: error, server: server)
+            statusText = "Error: \(message)"
+            return message
         }
+        return nil
     }
 }

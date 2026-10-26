@@ -20,23 +20,20 @@ enum IMAPService {
         try? await server.logout()
     }
 
-    // Returns the account's folders, Inbox first, each with its unread count.
+    // Returns the account's folders, Inbox first. Their unread counts start at 0:
+    // asking for counts is a separate step (`fetchCounts`), because some servers
+    // (Gmail, at about 1.4 seconds per folder) are slow to answer it.
     static func fetchFolders(for account: AccountSettings) async throws -> [MailFolder] {
         try await connection(for: account).run { server in
-            // Some servers give out-of-date counts for the folder that's currently open,
-            // so close it first. (`try?` because there may be no folder open.)
-            try? await server.unselectMailbox()
             var folders: [MailFolder] = []
             for mailbox in try await server.listMailboxes() where mailbox.isSelectable {
-                // STATUS asks the server for counts without opening the folder.
-                let status = try? await server.mailboxStatus(mailbox.name)
                 folders.append(MailFolder(
                     accountID: account.id,
                     path: mailbox.name,
                     displayName: friendlyName(for: mailbox),
                     role: role(of: mailbox),
-                    unreadCount: status?.unseenCount ?? 0,
-                    uidNext: status?.uidNext?.value
+                    unreadCount: 0,
+                    uidNext: nil
                 ))
             }
             // Sort like classic Outlook: Inbox, Drafts, Sent, Deleted, Junk, then the rest A–Z.
@@ -48,16 +45,71 @@ enum IMAPService {
         }
     }
 
-    // Returns summaries (sender, subject, date, read/unread) of the newest `limit`
-    // messages in a folder, plus how many messages the folder has in total.
-    static func fetchLatestMessages(for account: AccountSettings, folderPath: String, limit: Int) async throws -> (messages: [MailMessage], totalCount: Int) {
+    // Asks the server how many unread messages a folder has, and the ID the next
+    // new message will get (used to notice new mail), without opening the folder.
+    static func fetchCounts(of folder: MailFolder, account: AccountSettings) async throws -> (unread: Int, uidNext: UInt32?) {
         try await connection(for: account).run { server in
-            let selection = try await server.selectMailbox(folderPath)
-            guard let newest = selection.latest(limit) else { return ([], 0) }   // empty folder
-            let infos = try await server.fetchMessageInfosBulk(using: newest)
-            let messages = infos.compactMap { makeMailMessage(from: $0, account: account, folderPath: folderPath) }   // compactMap skips the nils
-            return (messages, selection.messageCount)
+            // Some servers give out-of-date counts for the folder that's currently open,
+            // so close it first. (`try?` because there may be no folder open.)
+            try? await server.unselectMailbox()
+            // STATUS asks for a folder's counts without opening it.
+            let status = try await server.mailboxStatus(folder.path)
+            return (status.unseenCount ?? 0, status.uidNext?.value)
         }
+    }
+
+    // MARK: - Syncing the local copy (see MailSync)
+
+    // How many messages' read/flag status to ask for per request.
+    private static let flagBatchSize = 500
+
+    // Asks the server which messages in a folder arrived since `startDate`, and
+    // each one's read/flagged status: just numbers and flags, no headers.
+    // The status is fetched in batches, each its own job, so other work can run in between.
+    static func fetchSyncSnapshot(of folder: MailFolder, since startDate: Date, account: AccountSettings) async throws -> ServerFolderSnapshot {
+        let (uidValidity, messageCount, uids) = try await connection(for: account).run { server in
+            let selection = try await server.selectMailbox(folder.path)
+            guard selection.messageCount > 0 else { return (selection.uidValidity.value, 0, [UInt32]()) }
+            // SINCE uses the date each message arrived on the server.
+            let result: ExtendedSearchResult<UID> = try await server.extendedSearch(criteria: [.since(startDate)])
+            return (selection.uidValidity.value, selection.messageCount, (result.all?.toArray() ?? []).map(\.value))
+        }
+        var flags: [UInt32: MessageFlags] = [:]
+        for start in stride(from: 0, to: uids.count, by: flagBatchSize) {
+            let batch = Array(uids[start ..< min(start + flagBatchSize, uids.count)])
+            let infos = try await connection(for: account).run { server in
+                try await server.selectMailbox(folder.path)
+                return try await server.fetchMessageInfosBulk(using: uidSet(batch), options: .uidFlagsOnly)
+            }
+            for info in infos {
+                guard let uid = info.uid else { continue }
+                flags[uid.value] = MessageFlags(isRead: info.flags.contains(.seen), isFlagged: info.flags.contains(.flagged))
+            }
+        }
+        return ServerFolderSnapshot(uidValidity: uidValidity, messageCount: messageCount, flags: flags)
+    }
+
+    // Downloads the headers (sender, subject, date…) of the given messages.
+    static func fetchHeaders(uids: [UInt32], in folder: MailFolder, account: AccountSettings) async throws -> [MailMessage] {
+        guard !uids.isEmpty else { return [] }
+        return try await connection(for: account).run { server in
+            try await server.selectMailbox(folder.path)
+            let infos = try await server.fetchMessageInfosBulk(using: uidSet(uids))
+            return infos.compactMap { makeMailMessage(from: $0, account: account, folderPath: folder.path) }   // compactMap skips the nils
+        }
+    }
+
+    // For "Show Older Messages": the next `limit` messages older than the offline
+    // window (which aren't kept on this Mac), skipping the `alreadyShown` newest of them.
+    static func fetchOlderMessages(in folder: MailFolder, before date: Date, skipping alreadyShown: Int, limit: Int,
+                                   account: AccountSettings) async throws -> [MailMessage] {
+        let uids = try await connection(for: account).run { server in
+            try await server.selectMailbox(folder.path)
+            let result: ExtendedSearchResult<UID> = try await server.extendedSearch(criteria: [.before(date)])
+            // Higher UIDs are newer, so newest first.
+            return (result.all?.toArray() ?? []).map(\.value).sorted(by: >).dropFirst(alreadyShown).prefix(limit)
+        }
+        return try await fetchHeaders(uids: Array(uids), in: folder, account: account)
     }
 
     // Asks the server to search a folder (sender, subject and body text) and

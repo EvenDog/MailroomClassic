@@ -24,6 +24,13 @@ struct FolderSidebarView: View {
             }
             ForEach(store.accounts) { account in
                 Section(account.emailAddress) {
+                    // If the last check of this account failed, say why (it stays until a check works).
+                    if let problem = store.accountProblems[account.id] {
+                        Label(problem, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .help(problem)
+                    }
                     ForEach(store.foldersByAccount[account.id] ?? []) { folder in
                         Label(folder.displayName, systemImage: folder.role.iconName)
                             .badge(folder.unreadCount)   // a count of 0 shows no badge

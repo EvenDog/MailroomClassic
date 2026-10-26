@@ -26,7 +26,8 @@ It works with:
 - A signature for each account (Settings → Edit), added to new emails, replies and forwards
 - The To and Cc fields suggest people you've emailed before, or whose mail you've opened
 - Search the current folder (sender, subject and message text), searched on the server
-- **Show Older Messages** loads 50 more at a time
+- **Keeps the last 12 months of mail headers on your Mac** (like Outlook's offline file), so folders open instantly. It syncs with the server in the background: your Inboxes after every check, and every other folder at least every 30 minutes. Message bodies and attachments still download when you open them.
+- **Show Older Messages** fetches mail older than 12 months from the server, 50 at a time
 - Mark as read/unread (⇧⌘U), flag (⇧⌘L), and Delete. Delete moves mail to Trash; deleting from Trash removes it for good, after asking.
 - Select several messages at once (⌘-click, ⇧-click) to delete, move, flag or mark them together
 - Move messages by dragging them onto a folder, or right-click → **Move To**
@@ -39,6 +40,7 @@ It works with:
 - Passwords and sign-in tokens are stored only in the **macOS Keychain**
 - Saved attachments are marked as downloaded from the internet, so macOS checks them before they can run
 - No analytics and no servers of its own: the app only talks to your mail providers
+- The saved copy is at `~/Library/Application Support/MailroomClassic/MailCache.sqlite`. Deleting that file is safe: the app downloads everything again.
 
 ## Requirements
 
@@ -108,7 +110,7 @@ swift scripts/make-icon.swift MailroomClassic/Assets.xcassets/AppIcon.appiconset
 
 ## Credits
 
-Built on [SwiftMail](https://github.com/Cocoanetics/SwiftMail) by Cocoanetics (BSD 2-Clause License).
+Built on [SwiftMail](https://github.com/Cocoanetics/SwiftMail) by Cocoanetics (BSD 2-Clause License) and [GRDB](https://github.com/groue/GRDB.swift) by Gwendal Roué (MIT License).
 
 ## License
 
