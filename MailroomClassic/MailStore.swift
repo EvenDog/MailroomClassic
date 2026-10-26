@@ -11,7 +11,10 @@ import SwiftMail
 @Observable
 final class MailStore {
     private(set) var accounts: [AccountSettings] = AccountStorage.loadAccounts()
-    private(set) var foldersByAccount: [UUID: [MailFolder]] = [:]
+    private(set) var foldersByAccount: [UUID: [MailFolder]] = [:] {
+        // `didSet` runs after every change: keep the Dock badge's unread count up to date.
+        didSet { NewMailNotifier.updateDockBadge(unreadCount: unreadInboxCount) }
+    }
     private(set) var messages: [MailMessage] = []
     private(set) var openMessage: OpenMessage?   // the full contents of the message in the reading pane
     private(set) var statusText = "Ready"
@@ -30,6 +33,11 @@ final class MailStore {
     // Every folder from every account, in one list.
     var allFolders: [MailFolder] {
         accounts.flatMap { foldersByAccount[$0.id] ?? [] }
+    }
+
+    // Unread messages across every account's Inbox (shown on the Dock icon).
+    var unreadInboxCount: Int {
+        allFolders.filter { $0.role == .inbox }.reduce(0) { $0 + $1.unreadCount }   // reduce = add them all up
     }
 
     // MARK: - Accounts
@@ -51,6 +59,26 @@ final class MailStore {
         await refreshFolders(for: account)
     }
 
+    // Saves changes to an existing account after checking the new settings can
+    // log in. `newSecret` is a new password (or Microsoft token), or nil to keep the old one.
+    // Throws if the login fails; the account is left unchanged in that case.
+    func updateAccount(_ updated: AccountSettings, newSecret: String?) async throws {
+        var testCredential: MailCredential?
+        if let newSecret, updated.provider != .office365 {
+            testCredential = .password(newSecret)
+        }
+        try await IMAPService.testLogin(updated, credential: testCredential)
+        if let newSecret {
+            try AccountStorage.saveSecret(newSecret, for: updated.id)
+        }
+        guard let index = accounts.firstIndex(where: { $0.id == updated.id }) else { return }
+        accounts[index] = updated
+        AccountStorage.saveAccounts(accounts)
+        // The open connection still uses the old settings, so start a new one.
+        await IMAPService.closeConnection(for: updated.id)
+        await refreshFolders(for: updated)
+    }
+
     func removeAccount(_ account: AccountSettings) {
         Task { await IMAPService.closeConnection(for: account.id) }
         AccountStorage.deleteSecret(for: account.id)
@@ -69,9 +97,22 @@ final class MailStore {
         }
     }
 
+    // Reloads one account's folders, and announces any new mail in its Inbox.
     func refreshFolders(for account: AccountSettings) async {
-        await reportingErrors("Checking \(account.displayName)…") {
-            foldersByAccount[account.id] = try await IMAPService.fetchFolders(for: account)
+        await reportingErrors("Checking \(account.displayName)…", server: account.imapHost) {
+            let previousFolders = foldersByAccount[account.id] ?? []
+            let folders = try await IMAPService.fetchFolders(for: account)
+            foldersByAccount[account.id] = folders
+
+            // If an Inbox's "next message ID" went up since last time, new mail arrived.
+            // (On the first check there's nothing to compare with, so no alerts.)
+            for inbox in folders where inbox.role == .inbox {
+                guard let previous = previousFolders.first(where: { $0.id == inbox.id }),
+                      let oldNext = previous.uidNext, let newNext = inbox.uidNext, newNext > oldNext else { continue }
+                // `try?`: if fetching the details fails, skip the alert rather than failing the check.
+                let arrivals = (try? await IMAPService.fetchNewMessages(for: account, folderPath: inbox.path, firstNewUID: oldNext)) ?? []
+                NewMailNotifier.announce(arrivals.filter { !$0.isRead }, account: account)
+            }
         }
     }
 
@@ -95,7 +136,7 @@ final class MailStore {
     // Replaces the message list with the server's search results for `query`.
     func search(_ query: String, in folder: MailFolder) async {
         guard let account = account(for: folder) else { return }
-        await reportingErrors("Searching \(folder.displayName)…") {
+        await reportingErrors("Searching \(folder.displayName)…", server: account.imapHost) {
             let results = try await IMAPService.searchMessages(for: account, folderPath: folder.path, query: query)
             guard shownFolderID == folder.id else { return }   // you switched folders meanwhile
             messages = results.sorted { $0.dateReceived > $1.dateReceived }
@@ -108,7 +149,7 @@ final class MailStore {
 
     private func fetchMessages(in folder: MailFolder, activity: String) async {
         guard let account = account(for: folder) else { return }
-        await reportingErrors(activity) {
+        await reportingErrors(activity, server: account.imapHost) {
             let page = try await IMAPService.fetchLatestMessages(for: account, folderPath: folder.path, limit: messageLimit)
             // If you clicked another folder while this was loading, throw this result away.
             guard !Task.isCancelled, shownFolderID == folder.id else { return }
@@ -121,7 +162,7 @@ final class MailStore {
     func open(_ message: MailMessage, in folder: MailFolder) async {
         openMessage = nil
         guard let account = account(for: folder) else { return }
-        await reportingErrors("Opening message…") {
+        await reportingErrors("Opening message…", server: account.imapHost) {
             let contents = try await IMAPService.fetchFullMessage(for: account, folderPath: folder.path, uid: message.uid)
             guard !Task.isCancelled else { return }
             openMessage = contents
@@ -138,42 +179,57 @@ final class MailStore {
 
     // MARK: - Changing mail
 
-    // Marks a message read or unread, on the server and on screen.
-    func setRead(_ isRead: Bool, for message: MailMessage, in folder: MailFolder) async {
-        guard let account = account(for: folder), message.isRead != isRead else { return }
-        await reportingErrors(isRead ? "Marking as read…" : "Marking as unread…") {
-            try await IMAPService.setFlag(.seen, to: isRead, uid: message.uid, in: folder.path, account: account)
-            updateLocally(message) { $0.isRead = isRead }
-            changeUnreadCount(of: folder, by: isRead ? -1 : 1)
+    // Marks messages read or unread, on the server and on screen.
+    func setRead(_ isRead: Bool, for selected: [MailMessage], in folder: MailFolder) async {
+        let changing = selected.filter { $0.isRead != isRead }   // skip ones already that way
+        guard let account = account(for: folder), !changing.isEmpty else { return }
+        await reportingErrors(isRead ? "Marking as read…" : "Marking as unread…", server: account.imapHost) {
+            try await IMAPService.setFlag(.seen, to: isRead, uids: changing.map(\.uid), in: folder.path, account: account)
+            for message in changing {
+                updateLocally(message) { $0.isRead = isRead }
+            }
+            changeUnreadCount(of: folder, by: isRead ? -changing.count : changing.count)
         }
     }
 
-    // Flags or unflags a message, on the server and on screen.
-    func setFlagged(_ isFlagged: Bool, for message: MailMessage, in folder: MailFolder) async {
-        guard let account = account(for: folder) else { return }
-        await reportingErrors(isFlagged ? "Flagging…" : "Clearing flag…") {
-            try await IMAPService.setFlag(.flagged, to: isFlagged, uid: message.uid, in: folder.path, account: account)
-            updateLocally(message) { $0.isFlagged = isFlagged }
+    // Flags or unflags messages, on the server and on screen.
+    func setFlagged(_ isFlagged: Bool, for selected: [MailMessage], in folder: MailFolder) async {
+        guard let account = account(for: folder), !selected.isEmpty else { return }
+        await reportingErrors(isFlagged ? "Flagging…" : "Clearing flags…", server: account.imapHost) {
+            try await IMAPService.setFlag(.flagged, to: isFlagged, uids: selected.map(\.uid), in: folder.path, account: account)
+            for message in selected {
+                updateLocally(message) { $0.isFlagged = isFlagged }
+            }
         }
     }
 
-    // Moves a message to the account's Trash folder, or erases it for good if
-    // it's already in Trash (ContentView asks you to confirm that first).
-    func deleteMessage(_ message: MailMessage, in folder: MailFolder) async {
-        guard let account = account(for: folder) else { return }
-        await reportingErrors("Deleting…") {
-            if folder.role == .trash {
-                try await IMAPService.deletePermanently(uid: message.uid, in: folder.path, account: account)
-            } else {
-                guard let trash = foldersByAccount[account.id]?.first(where: { $0.role == .trash }) else {
-                    throw MailError(message: "This account doesn't have a Trash folder.")
-                }
-                try await IMAPService.moveMessage(uid: message.uid, from: folder.path, to: trash.path, account: account)
+    // Moves messages to the account's Trash folder, or erases them for good if
+    // they're already in Trash (ContentView asks you to confirm that first).
+    func deleteMessages(_ selected: [MailMessage], in folder: MailFolder) async {
+        guard let account = account(for: folder), !selected.isEmpty else { return }
+        if folder.role == .trash {
+            await reportingErrors("Deleting…", server: account.imapHost) {
+                try await IMAPService.deletePermanently(uids: selected.map(\.uid), in: folder.path, account: account)
+                removeLocally(selected, from: folder)
             }
-            messages.removeAll { $0.id == message.id }
-            if !message.isRead {
-                changeUnreadCount(of: folder, by: -1)
-            }
+        } else if let trash = self.folder(.trash, in: account) {
+            await moveMessages(selected, from: folder, to: trash)
+        } else {
+            statusText = "Error: This account doesn't have a Trash folder."
+        }
+    }
+
+    // Moves messages to another folder in the same account.
+    func moveMessages(_ selected: [MailMessage], from folder: MailFolder, to destination: MailFolder) async {
+        guard let account = account(for: folder), !selected.isEmpty, destination.id != folder.id else { return }
+        guard destination.accountID == folder.accountID else {
+            statusText = "Messages can only be moved between folders of the same account."
+            return
+        }
+        await reportingErrors("Moving to \(destination.displayName)…", server: account.imapHost) {
+            try await IMAPService.moveMessages(uids: selected.map(\.uid), from: folder.path, to: destination.path, account: account)
+            removeLocally(selected, from: folder)
+            changeUnreadCount(of: destination, by: selected.filter { !$0.isRead }.count)
         }
     }
 
@@ -189,7 +245,7 @@ final class MailStore {
 
         // It's sent, so the saved draft (if any) is no longer needed.
         if let draftUID = draft.savedDraftUID, let draftsFolder = folder(.drafts, in: account) {
-            try? await IMAPService.deletePermanently(uid: draftUID, in: draftsFolder.path, account: account)
+            try? await IMAPService.deletePermanently(uids: [draftUID], in: draftsFolder.path, account: account)
         }
 
         // The email is sent at this point; failing to save a copy shouldn't count as a send failure.
@@ -198,7 +254,7 @@ final class MailStore {
             do {
                 try await IMAPService.saveCopy(of: email, to: sentFolder.path, account: account)
             } catch {
-                statusText = "Sent, but couldn't save a copy to \(sentFolder.displayName): \(error.localizedDescription)"
+                statusText = "Sent, but couldn't save a copy to \(sentFolder.displayName): \(FriendlyError.message(for: error, server: account.imapHost))"
             }
         }
     }
@@ -213,7 +269,7 @@ final class MailStore {
         let email = try makeEmail(from: draft, account: account)
         let newUID = try await IMAPService.saveDraft(email, to: draftsFolder.path, account: account)
         if let oldUID = draft.savedDraftUID {
-            try? await IMAPService.deletePermanently(uid: oldUID, in: draftsFolder.path, account: account)
+            try? await IMAPService.deletePermanently(uids: [oldUID], in: draftsFolder.path, account: account)
         }
         // If you're looking at the Drafts folder, refresh it so the change shows.
         if shownFolderID == draftsFolder.id {
@@ -272,6 +328,13 @@ final class MailStore {
         }
     }
 
+    // Takes messages off the list on screen (after a move or delete).
+    private func removeLocally(_ removed: [MailMessage], from folder: MailFolder) {
+        let removedIDs = Set(removed.map(\.id))
+        messages.removeAll { removedIDs.contains($0.id) }
+        changeUnreadCount(of: folder, by: -removed.filter { !$0.isRead }.count)
+    }
+
     private func changeUnreadCount(of folder: MailFolder, by change: Int) {
         if let index = foldersByAccount[folder.accountID]?.firstIndex(where: { $0.id == folder.id }) {
             foldersByAccount[folder.accountID]?[index].unreadCount += change
@@ -314,8 +377,9 @@ final class MailStore {
     }
 
     // Runs a piece of mail work while showing `activity` in the status bar.
-    // If the work fails, shows the error there instead of crashing.
-    private func reportingErrors(_ activity: String, work: () async throws -> Void) async {
+    // If the work fails, shows a readable error there instead of crashing.
+    // `server` names the server involved, for the error message.
+    private func reportingErrors(_ activity: String, server: String, work: () async throws -> Void) async {
         statusText = activity
         do {
             try await work()
@@ -323,7 +387,7 @@ final class MailStore {
         } catch is CancellationError {
             // Cancelled because you clicked something else; not a real error.
         } catch {
-            statusText = "Error: \(error.localizedDescription)"
+            statusText = "Error: \(FriendlyError.message(for: error, server: server))"
         }
     }
 }

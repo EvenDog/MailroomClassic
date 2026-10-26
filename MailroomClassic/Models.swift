@@ -94,6 +94,9 @@ struct MailFolder: Identifiable, Hashable {
     let displayName: String    // the friendly name we show, e.g. "Sent"
     let role: FolderRole
     var unreadCount: Int
+    // The ID the server will give the next message that arrives. If it goes up
+    // between checks, new mail has arrived. (Nil if the server doesn't say.)
+    var uidNext: UInt32?
 
     // Folder names are only unique within one account, so combine both.
     var id: String { "\(accountID)/\(path)" }

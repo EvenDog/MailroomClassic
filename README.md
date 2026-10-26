@@ -22,6 +22,11 @@ It works with:
 - Search the current folder (sender, subject and message text), searched on the server
 - **Show Older Messages** loads 50 more at a time
 - Mark as read/unread (⇧⌘U), flag (⇧⌘L), and Delete. Delete moves mail to Trash; deleting from Trash removes it for good, after asking.
+- Select several messages at once (⌘-click, ⇧-click) to delete, move, flag or mark them together
+- Move messages by dragging them onto a folder, or right-click → **Move To**
+- Checks for new mail automatically (every 1–30 minutes, or manually), with a notification for new mail and the unread count on the Dock icon
+- Edit an account's settings at any time; changes are tested before they're saved
+- Plain-English error messages (e.g. "Couldn't connect to … Check the server name")
 - Send/Receive button and a status bar
 - Keeps one connection open per account, so clicking around is quick
 - Passwords and sign-in tokens are stored only in the **macOS Keychain**

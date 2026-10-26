@@ -24,6 +24,10 @@ struct ComposeView: View {
         _messageText = State(initialValue: RichTextEditor.initialText(html: draft.htmlBody, plain: draft.body))
     }
 
+    private var sendingAccount: AccountSettings? {
+        store.accounts.first { $0.id == draft.accountID }
+    }
+
     private var canSend: Bool {
         !isWorking && draft.accountID != nil && !draft.to.trimmingCharacters(in: .whitespaces).isEmpty
     }
@@ -142,7 +146,7 @@ struct ComposeView: View {
             try await store.send(draft)
             dismiss()
         } catch {
-            errorMessage = "Couldn't send: \(error.localizedDescription)"
+            errorMessage = "Couldn't send: \(FriendlyError.message(for: error, server: sendingAccount?.smtpHost))"
         }
         isWorking = false
     }
@@ -155,7 +159,7 @@ struct ComposeView: View {
             draft.savedDraftUID = try await store.saveDraft(draft)
             draftSavedAt = Date()
         } catch {
-            errorMessage = "Couldn't save the draft: \(error.localizedDescription)"
+            errorMessage = "Couldn't save the draft: \(FriendlyError.message(for: error, server: sendingAccount?.imapHost))"
         }
         isWorking = false
     }

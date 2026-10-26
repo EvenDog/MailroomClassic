@@ -13,15 +13,19 @@ enum IMAPService {
     private static var connections: [UUID: AccountConnection] = [:]
 
     // Logs in and immediately out on a separate, temporary connection, to check
-    // a new account's settings work before it's saved.
-    static func testLogin(_ account: AccountSettings) async throws {
-        let server = try await connectAndLogIn(account)
+    // an account's settings work before they're saved. Pass `credential` to test
+    // a password that isn't in the Keychain yet.
+    static func testLogin(_ account: AccountSettings, credential: MailCredential? = nil) async throws {
+        let server = try await connectAndLogIn(account, credential: credential)
         try? await server.logout()
     }
 
     // Returns the account's folders, Inbox first, each with its unread count.
     static func fetchFolders(for account: AccountSettings) async throws -> [MailFolder] {
         try await connection(for: account).run { server in
+            // Some servers give out-of-date counts for the folder that's currently open,
+            // so close it first. (`try?` because there may be no folder open.)
+            try? await server.unselectMailbox()
             var folders: [MailFolder] = []
             for mailbox in try await server.listMailboxes() where mailbox.isSelectable {
                 // STATUS asks the server for counts without opening the folder.
@@ -31,7 +35,8 @@ enum IMAPService {
                     path: mailbox.name,
                     displayName: friendlyName(for: mailbox),
                     role: role(of: mailbox),
-                    unreadCount: status?.unseenCount ?? 0
+                    unreadCount: status?.unseenCount ?? 0,
+                    uidNext: status?.uidNext?.value
                 ))
             }
             // Sort like classic Outlook: Inbox, Drafts, Sent, Deleted, Junk, then the rest A–Z.
@@ -71,6 +76,17 @@ enum IMAPService {
         }
     }
 
+    // Returns the messages that arrived since `firstNewUID` (used for new-mail alerts).
+    static func fetchNewMessages(for account: AccountSettings, folderPath: String, firstNewUID: UInt32) async throws -> [MailMessage] {
+        try await connection(for: account).run { server in
+            try await server.selectMailbox(folderPath)
+            let infos = try await server.fetchMessageInfos(uidRange: UID(firstNewUID)...)
+            // IMAP always returns at least the newest message for "from here on",
+            // even if it's older than `firstNewUID`, so filter those out.
+            return infos.compactMap { makeMailMessage(from: $0) }.filter { $0.uid >= firstNewUID }
+        }
+    }
+
     // Downloads one whole message (text, HTML and attachments) and marks it as read on the server.
     static func fetchFullMessage(for account: AccountSettings, folderPath: String, uid: UInt32) async throws -> OpenMessage {
         try await connection(for: account).run { server in
@@ -84,29 +100,29 @@ enum IMAPService {
         }
     }
 
-    // Turns a flag such as "read" (\Seen) or "flagged" on or off for one message.
-    static func setFlag(_ flag: Flag, to isOn: Bool, uid: UInt32, in folderPath: String, account: AccountSettings) async throws {
+    // Turns a flag such as "read" (\Seen) or "flagged" on or off for some messages.
+    static func setFlag(_ flag: Flag, to isOn: Bool, uids: [UInt32], in folderPath: String, account: AccountSettings) async throws {
         try await connection(for: account).run { server in
             try await server.selectMailbox(folderPath)
-            try await server.store(flags: [flag], on: UIDSet(UID(uid)), operation: isOn ? .add : .remove)
+            try await server.store(flags: [flag], on: uidSet(uids), operation: isOn ? .add : .remove)
         }
     }
 
-    // Moves a message to another folder (used by Delete to move it into Trash).
-    static func moveMessage(uid: UInt32, from folderPath: String, to destinationPath: String, account: AccountSettings) async throws {
+    // Moves messages to another folder in the same account (also used by Delete to move them into Trash).
+    static func moveMessages(uids: [UInt32], from folderPath: String, to destinationPath: String, account: AccountSettings) async throws {
         try await connection(for: account).run { server in
             try await server.selectMailbox(folderPath)
-            try await server.move(messages: UIDSet(UID(uid)), to: destinationPath)
+            try await server.move(messages: uidSet(uids), to: destinationPath)
         }
     }
 
-    // Permanently erases a message (used when deleting from Trash).
-    static func deletePermanently(uid: UInt32, in folderPath: String, account: AccountSettings) async throws {
+    // Permanently erases messages (used when deleting from Trash).
+    static func deletePermanently(uids: [UInt32], in folderPath: String, account: AccountSettings) async throws {
         try await connection(for: account).run { server in
             try await server.selectMailbox(folderPath)
-            let thisMessage = UIDSet(UID(uid))
-            try await server.store(flags: [.deleted], on: thisMessage, operation: .add)
-            try await server.expunge(messages: thisMessage)   // "expunge" = really remove deleted messages
+            let messages = uidSet(uids)
+            try await server.store(flags: [.deleted], on: messages, operation: .add)
+            try await server.expunge(messages: messages)   // "expunge" = really remove deleted messages
         }
     }
 
@@ -133,13 +149,19 @@ enum IMAPService {
 
     // MARK: - Connecting
 
-    // Opens a new connection to the account's server and logs in.
-    static func connectAndLogIn(_ account: AccountSettings) async throws -> IMAPServer {
-        let credential = try await MailCredential.forAccount(account)
+    // Opens a new connection to the account's server and logs in, using
+    // `credential` if given, or the one saved for the account otherwise.
+    static func connectAndLogIn(_ account: AccountSettings, credential: MailCredential? = nil) async throws -> IMAPServer {
+        let login: MailCredential
+        if let credential {
+            login = credential
+        } else {
+            login = try await MailCredential.forAccount(account)
+        }
         let server = IMAPServer(host: account.imapHost, port: account.imapPort)
         try await server.connect()
         do {
-            switch credential {
+            switch login {
             case .password(let password):
                 try await server.login(username: account.emailAddress, password: password)
             case .accessToken(let token):
@@ -150,6 +172,11 @@ enum IMAPService {
             try? await server.disconnect()
             throw error
         }
+    }
+
+    // SwiftMail's set-of-message-IDs type, built from our plain numbers.
+    private static func uidSet(_ uids: [UInt32]) -> UIDSet {
+        UIDSet(uids.map { UID($0) })
     }
 
     private static func connection(for account: AccountSettings) -> AccountConnection {

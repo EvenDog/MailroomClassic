@@ -1,5 +1,6 @@
-// The Settings window (Mailroom Classic → Settings…, or ⌘,): lists your
-// accounts and has a form to add a new one. The form changes with the account
+// The Settings window (Mailroom Classic → Settings…, or ⌘,): how often to
+// check for mail, your accounts (with Edit and Remove), and a form to add a
+// new account or edit an existing one. The form changes with the account
 // type: Gmail and Office 365 fill in their own server settings, and Office 365
 // signs in through Microsoft's sign-in page instead of a password. The form
 // can also be filled in from a provider's configuration profile (.mobileconfig).
@@ -14,7 +15,14 @@ struct AccountsSettingsView: View {
     @Environment(MailStore.self) private var store
     @Environment(\.webAuthenticationSession) private var webAuthenticationSession
 
-    // What's typed into the "Add an Account" form.
+    // Saved settings (also read by the main window and NewMailNotifier).
+    @AppStorage("checkIntervalMinutes") private var checkIntervalMinutes = 5
+    @AppStorage(NewMailNotifier.settingKey) private var notifyNewMail = true
+
+    // The account being edited, or nil when the form is adding a new one.
+    @State private var editingAccount: AccountSettings?
+
+    // What's typed into the account form.
     @State private var provider: MailProvider = .other
     @State private var senderName = ""
     @State private var emailAddress = ""
@@ -33,16 +41,44 @@ struct AccountsSettingsView: View {
     @State private var importWarning: String?      // e.g. the server name doesn't exist
 
     private var formIsComplete: Bool {
+        // When editing, an empty password means "keep the current one".
+        let passwordIfNeeded = editingAccount == nil ? [password] : []
         let required: [String] = switch provider {
-        case .other: [senderName, emailAddress, imapHost, password]
-        case .gmail: [senderName, emailAddress, password]
+        case .other: [senderName, emailAddress, imapHost] + passwordIfNeeded
+        case .gmail: [senderName, emailAddress] + passwordIfNeeded
         case .office365: [senderName, emailAddress, microsoftClientID]
         }
         return !required.contains { trimmed($0).isEmpty }
     }
 
+    // Office 365 has to sign in again if the email address or client ID changed.
+    private var editNeedsMicrosoftSignIn: Bool {
+        guard let editingAccount, editingAccount.provider == .office365 else { return false }
+        return editingAccount.emailAddress != trimmed(emailAddress)
+            || editingAccount.microsoftClientID != trimmed(microsoftClientID)
+    }
+
+    private var primaryButtonTitle: String {
+        if editingAccount != nil {
+            return editNeedsMicrosoftSignIn ? "Sign In with Microsoft & Save…" : "Save Changes"
+        }
+        return provider == .office365 ? "Sign In with Microsoft…" : "Test & Add Account"
+    }
+
     var body: some View {
         Form {
+            Section("Checking for Mail") {
+                Picker("Check for new mail", selection: $checkIntervalMinutes) {
+                    Text("Every minute").tag(1)
+                    Text("Every 5 minutes").tag(5)
+                    Text("Every 10 minutes").tag(10)
+                    Text("Every 15 minutes").tag(15)
+                    Text("Every 30 minutes").tag(30)
+                    Text("Manually (Send/Receive only)").tag(0)
+                }
+                Toggle("Show a notification when new mail arrives", isOn: $notifyNewMail)
+            }
+
             Section("Accounts") {
                 if store.accounts.isEmpty {
                     Text("No accounts yet.")
@@ -57,19 +93,24 @@ struct AccountsSettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
+                        Button("Edit") { startEditing(account) }
+                            .disabled(isWorking)
                         Button("Remove", role: .destructive) {
+                            if editingAccount?.id == account.id { clearForm() }
                             store.removeAccount(account)
                         }
                     }
                 }
             }
 
-            Section("Add an Account") {
-                HStack {
-                    Text("Have a setup file from your email provider?")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Import Profile…") { isChoosingProfile = true }
+            Section(editingAccount.map { "Edit “\($0.displayName)”" } ?? "Add an Account") {
+                if editingAccount == nil {
+                    HStack {
+                        Text("Have a setup file from your email provider?")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Import Profile…") { isChoosingProfile = true }
+                    }
                 }
                 if let importMessage {
                     Text(importMessage)
@@ -87,6 +128,7 @@ struct AccountsSettingsView: View {
                         Text(provider.label).tag(provider)
                     }
                 }
+                .disabled(editingAccount != nil)   // to change type, remove the account and add it again
                 TextField("Your name", text: $senderName, prompt: Text("Shown to people you email"))
                 TextField("Email address", text: $emailAddress, prompt: Text(verbatim: "you@example.com"))   // `verbatim` stops it being shown as a link
                 TextField("Account name", text: $displayName, prompt: Text("Optional, e.g. Work"))
@@ -97,9 +139,9 @@ struct AccountsSettingsView: View {
                     TextField("Incoming port", value: $imapPort, format: .number.grouping(.never))
                     TextField("Outgoing (SMTP) server", text: $smtpHost, prompt: Text("Leave blank if same as incoming"))
                     TextField("Outgoing port", value: $smtpPort, format: .number.grouping(.never))
-                    SecureField("Password", text: $password)
+                    SecureField("Password", text: $password, prompt: passwordPrompt)
                 case .gmail:
-                    SecureField("App password", text: $password)
+                    SecureField("App password", text: $password, prompt: passwordPrompt)
                     Text("Gmail needs an **app password**, not your normal password. Turn on 2-Step Verification, then create one at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -121,9 +163,19 @@ struct AccountsSettingsView: View {
                         ProgressView()
                             .controlSize(.small)
                     }
-                    Button(provider == .office365 ? "Sign In with Microsoft…" : "Test & Add Account") {
+                    if editingAccount != nil {
+                        Button("Cancel") { clearForm() }
+                            .disabled(isWorking)
+                    }
+                    Button(primaryButtonTitle) {
                         // `Task { }` starts async work from a button tap, which can't wait itself.
-                        Task { await addAccount() }
+                        Task {
+                            if let editingAccount {
+                                await saveChanges(to: editingAccount)
+                            } else {
+                                await addAccount()
+                            }
+                        }
                     }
                     .disabled(!formIsComplete || isWorking)
                 }
@@ -138,6 +190,13 @@ struct AccountsSettingsView: View {
                 Task { await importProfile(from: url) }
             }
         }
+        .onChange(of: notifyNewMail) {
+            if notifyNewMail { NewMailNotifier.requestPermission() }
+        }
+    }
+
+    private var passwordPrompt: Text? {
+        editingAccount == nil ? nil : Text("Leave blank to keep the current one")
     }
 
     // The file type for ".mobileconfig" files (falls back to "any data" if macOS doesn't know it).
@@ -173,6 +232,42 @@ struct AccountsSettingsView: View {
             importMessage = nil
             errorMessage = "Couldn't import the profile: \(error.localizedDescription)"
         }
+    }
+
+    // Fills the form with an existing account's settings, ready to edit.
+    private func startEditing(_ account: AccountSettings) {
+        clearForm()
+        editingAccount = account
+        provider = account.provider
+        senderName = account.senderName
+        emailAddress = account.emailAddress
+        displayName = account.displayName == account.emailAddress ? "" : account.displayName
+        imapHost = account.imapHost
+        imapPort = account.imapPort
+        smtpHost = account.smtpHost.caseInsensitiveCompare(account.imapHost) == .orderedSame ? "" : account.smtpHost
+        smtpPort = account.smtpPort
+        microsoftClientID = account.microsoftClientID ?? ""
+    }
+
+    // Tests the edited settings and saves them. On failure, the account stays as it was.
+    private func saveChanges(to original: AccountSettings) async {
+        isWorking = true
+        errorMessage = nil
+        var updated = makeAccount()
+        updated.id = original.id   // same account, new settings
+        do {
+            var newSecret: String? = trimmed(password).isEmpty ? nil : password
+            if updated.provider == .office365 {
+                newSecret = editNeedsMicrosoftSignIn
+                    ? try await MicrosoftOAuth.signIn(account: updated, using: webAuthenticationSession)
+                    : nil
+            }
+            try await store.updateAccount(updated, newSecret: newSecret)
+            clearForm()
+        } catch {
+            errorMessage = "Couldn't save the changes: \(FriendlyError.message(for: error, server: updated.imapHost))"
+        }
+        isWorking = false
     }
 
     // Builds the account from the form, using the known server settings for Gmail and Office 365.
@@ -216,12 +311,15 @@ struct AccountsSettingsView: View {
             try await store.addAccount(account, secret: secret)
             clearForm()
         } catch {
-            errorMessage = "Couldn't add the account: \(error.localizedDescription)"
+            errorMessage = "Couldn't add the account: \(FriendlyError.message(for: error, server: account.imapHost))"
         }
         isWorking = false
     }
 
     private func clearForm() {
+        editingAccount = nil
+        errorMessage = nil
+        provider = .other
         importMessage = nil
         importWarning = nil
         senderName = ""
