@@ -1,7 +1,9 @@
 // The compose window, used for New Email, Reply, Reply All, Forward and editing
 // drafts: From / To / Cc / Subject fields on top, attached files under them, a
 // formatted message body below, and Send, Save Draft and Attach buttons in the
-// toolbar. The window closes itself once the email is sent.
+// toolbar. The To and Cc fields suggest addresses you've used before, new
+// emails start with your signature, and closing an unsent email asks whether
+// to save it. The window closes itself once the email is sent.
 
 import SwiftUI
 
@@ -15,6 +17,15 @@ struct ComposeView: View {
     @State private var isChoosingAttachments = false
     @State private var errorMessage: String?
     @State private var draftSavedAt: Date?
+    // What the window held when it opened or was last saved, to tell whether
+    // anything has changed since. Nil until the window first appears.
+    @State private var savedSnapshot: Snapshot?
+
+    private struct Snapshot: Equatable {
+        var accountID: UUID?
+        var to, cc, subject, body: String
+        var attachmentURLs: [URL]
+    }
 
     // A custom init so the editor can start with the draft's text.
     // `_draft` and `_messageText` are the @State wrappers themselves, which is how you
@@ -26,6 +37,16 @@ struct ComposeView: View {
 
     private var sendingAccount: AccountSettings? {
         store.accounts.first { $0.id == draft.accountID }
+    }
+
+    private var currentSnapshot: Snapshot {
+        // Only the text is compared, so a formatting-only change (e.g. making a word bold) doesn't count.
+        Snapshot(accountID: draft.accountID, to: draft.to, cc: draft.cc, subject: draft.subject,
+                 body: messageText.string, attachmentURLs: draft.attachmentURLs)
+    }
+
+    private var hasUnsavedChanges: Bool {
+        savedSnapshot != nil && currentSnapshot != savedSnapshot
     }
 
     private var canSend: Bool {
@@ -43,7 +64,9 @@ struct ComposeView: View {
                     }
                 }
                 TextField("To:", text: $draft.to, prompt: Text("Separate addresses with commas"))
+                    .textInputSuggestions { addressSuggestions(for: draft.to) }
                 TextField("Cc:", text: $draft.cc)
+                    .textInputSuggestions { addressSuggestions(for: draft.cc) }
                 TextField("Subject:", text: $draft.subject)
             }
             .formStyle(.columns)   // labels in a column on the left, like Outlook
@@ -102,11 +125,34 @@ struct ComposeView: View {
             }
         }
         .onAppear {
+            guard savedSnapshot == nil else { return }   // only the first time the window appears
             // New Email from the menu doesn't pick an account, so default to the first one.
             if draft.accountID == nil {
                 draft.accountID = store.accounts.first?.id
             }
+            addSignature()
+            savedSnapshot = currentSnapshot
         }
+        .background(WindowCloseGuard(hasUnsavedChanges: hasUnsavedChanges) { await saveDraft() })
+    }
+
+    // The drop-down list under To or Cc while you type. Picking a suggestion
+    // replaces the partly typed address with the full one.
+    private func addressSuggestions(for fieldText: String) -> some View {
+        ForEach(RecentAddresses.matches(for: fieldText), id: \.self) { address in
+            Text(address.formatted)
+                .textInputCompletion(RecentAddresses.completing(fieldText, with: address))
+        }
+    }
+
+    // Puts the account's signature at the top of a new email, reply or forward
+    // (so in a reply it sits above the quoted original). A saved draft already has its own.
+    private func addSignature() {
+        guard draft.savedDraftUID == nil,
+              let signature = sendingAccount?.signature, !signature.isEmpty else { return }
+        let withSignature = NSMutableAttributedString(string: "\n\n" + signature, attributes: RichTextEditor.defaultAttributes)
+        withSignature.append(messageText)
+        messageText = withSignature
     }
 
     // One row of buttons, one per attached file; clicking one removes it.
@@ -144,6 +190,7 @@ struct ComposeView: View {
         captureBody()
         do {
             try await store.send(draft)
+            savedSnapshot = currentSnapshot   // sent, so closing shouldn't ask to save
             dismiss()
         } catch {
             errorMessage = "Couldn't send: \(FriendlyError.message(for: error, server: sendingAccount?.smtpHost))"
@@ -151,16 +198,22 @@ struct ComposeView: View {
         isWorking = false
     }
 
-    private func saveDraft() async {
+    // Saves to the Drafts folder. Returns whether it worked (the close prompt needs to know).
+    // `@discardableResult` lets the Save Draft button ignore that answer without a warning.
+    @discardableResult
+    private func saveDraft() async -> Bool {
         isWorking = true
         errorMessage = nil
         captureBody()
+        defer { isWorking = false }   // `defer` runs this line on the way out, whichever `return` is used
         do {
             draft.savedDraftUID = try await store.saveDraft(draft)
             draftSavedAt = Date()
+            savedSnapshot = currentSnapshot
+            return true
         } catch {
             errorMessage = "Couldn't save the draft: \(FriendlyError.message(for: error, server: sendingAccount?.imapHost))"
+            return false
         }
-        isWorking = false
     }
 }

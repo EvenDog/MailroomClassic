@@ -11,6 +11,7 @@ It works with:
 ## Features
 
 - Three-pane layout with unread mail in **bold**, unread counts on folders, and paperclip and red-flag columns
+- Click the From, Subject or Received column header to sort by it
 - Formatted (HTML) emails, displayed safely:
   - JavaScript is off
   - Links open in your browser
@@ -18,12 +19,15 @@ It works with:
 - Attachments: click to open, right-click to save, and attach files when you write. Forwarding keeps the original attachments.
 - New Email, Reply, Reply All and Forward, with Outlook-style quoting of the original message
 - Formatted writing (bold, italic, underline, fonts, colors) from the **Format** menu, sent as HTML with a plain-text copy
-- Save Draft (⌘S) to your Drafts folder, and pick up where you left off with **Edit Draft**
+- Save Draft (⌘S) to your Drafts folder, and pick up where you left off with **Edit Draft**. Closing an unsent email asks whether to save it.
+- A signature for each account (Settings → Edit), added to new emails, replies and forwards
+- The To and Cc fields suggest people you've emailed before, or whose mail you've opened
 - Search the current folder (sender, subject and message text), searched on the server
 - **Show Older Messages** loads 50 more at a time
 - Mark as read/unread (⇧⌘U), flag (⇧⌘L), and Delete. Delete moves mail to Trash; deleting from Trash removes it for good, after asking.
 - Select several messages at once (⌘-click, ⇧-click) to delete, move, flag or mark them together
 - Move messages by dragging them onto a folder, or right-click → **Move To**
+- **Junk** button (⇧⌘J) moves mail to the Junk folder; in the Junk folder it becomes **Not Junk** and moves mail back to the Inbox
 - Checks for new mail automatically (every 1–30 minutes, or manually), with a notification for new mail and the unread count on the Dock icon
 - Edit an account's settings at any time; changes are tested before they're saved
 - Plain-English error messages (e.g. "Couldn't connect to … Check the server name")
@@ -86,7 +90,8 @@ Microsoft only allows OAuth ("Sign in with Microsoft") for IMAP and SMTP. That m
 ## Current limitations
 
 - Search looks in one folder at a time
-- Closing a compose window doesn't ask whether to save the draft first
+- Quitting the app (⌘Q) with an unsent email open doesn't ask to save it; only closing its window does
+- A signature is added when the compose window opens, so switching the From account doesn't swap it
 - Opening a message downloads its attachments too, so very large attachments make it slow to open
 
 ## App icon

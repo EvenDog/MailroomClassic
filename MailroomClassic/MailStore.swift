@@ -166,6 +166,10 @@ final class MailStore {
             let contents = try await IMAPService.fetchFullMessage(for: account, folderPath: folder.path, uid: message.uid)
             guard !Task.isCancelled else { return }
             openMessage = contents
+            // Remember the sender for To/Cc suggestions (but not junk mail senders).
+            if folder.role != .junk {
+                RecentAddresses.remember([message.sender])
+            }
             if !message.isRead {
                 updateLocally(message) { $0.isRead = true }
                 changeUnreadCount(of: folder, by: -1)
@@ -242,6 +246,7 @@ final class MailStore {
         statusText = "Sending…"
         try await SMTPService.send(email, from: account)
         statusText = "Sent"
+        RecentAddresses.remember((email.recipients + email.ccRecipients).map { MailAddress(name: $0.name, address: $0.address) })
 
         // It's sent, so the saved draft (if any) is no longer needed.
         if let draftUID = draft.savedDraftUID, let draftsFolder = folder(.drafts, in: account) {

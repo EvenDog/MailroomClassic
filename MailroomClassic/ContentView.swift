@@ -43,6 +43,14 @@ struct ContentView: View {
         return (store.foldersByAccount[folder.accountID] ?? []).filter { $0.id != folder.id }
     }
 
+    // Where the Junk button sends messages: the Junk folder, or back to the
+    // Inbox ("Not Junk") if you're already looking at Junk.
+    private var junkButtonDestination: MailFolder? {
+        guard let folder = selectedFolder else { return nil }
+        let role: FolderRole = folder.role == .junk ? .inbox : .junk
+        return store.foldersByAccount[folder.accountID]?.first { $0.role == role }
+    }
+
     private var folderCount: Int {
         store.allFolders.count
     }
@@ -186,6 +194,15 @@ struct ContentView: View {
             .help("Delete (⌫)")
             .keyboardShortcut(.delete, modifiers: [])
             .disabled(selection.isEmpty)
+            let isInJunk = selectedFolder?.role == .junk
+            Button(isInJunk ? "Not Junk" : "Junk", systemImage: isInJunk ? "tray.and.arrow.up" : "xmark.bin") {
+                if let destination = junkButtonDestination {
+                    perform(.move(to: destination), on: selectedMessages)
+                }
+            }
+            .help(isInJunk ? "Not Junk: move back to the Inbox (⇧⌘J)" : "Junk: move to the Junk folder (⇧⌘J)")
+            .keyboardShortcut("j", modifiers: [.command, .shift])
+            .disabled(selection.isEmpty || junkButtonDestination == nil)
         }
         ToolbarItemGroup {
             // If any selected message is unread, the button marks them all read; otherwise unread.

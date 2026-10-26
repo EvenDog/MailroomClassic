@@ -41,6 +41,7 @@ struct AccountSettings: Codable, Identifiable, Hashable {
     var smtpHost: String       // outgoing mail server
     var smtpPort: Int          // 465 (secure from the start) or 587 (upgrades to secure)
     var microsoftClientID: String?   // only for Office 365; see README for how to get one
+    var signature: String?           // added to the bottom of emails you write, if set
 }
 
 // What a folder is for. Decides its icon, its place in the list, and which
@@ -136,6 +137,10 @@ struct MailMessage: Identifiable {
     var isFlagged: Bool
 
     var id: UInt32 { uid }
+
+    // The sender's name, or their address if there's no name. Shown in the
+    // From column, and what that column sorts by.
+    var senderDisplayName: String { sender.name ?? sender.address }
 }
 
 // The full contents of the message open in the reading pane.

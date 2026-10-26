@@ -1,6 +1,6 @@
 // The Settings window (Mailroom Classic → Settings…, or ⌘,): how often to
 // check for mail, your accounts (with Edit and Remove), and a form to add a
-// new account or edit an existing one. The form changes with the account
+// new account or edit an existing one (including its signature). The form changes with the account
 // type: Gmail and Office 365 fill in their own server settings, and Office 365
 // signs in through Microsoft's sign-in page instead of a password. The form
 // can also be filled in from a provider's configuration profile (.mobileconfig).
@@ -33,6 +33,7 @@ struct AccountsSettingsView: View {
     @State private var smtpPort = 465
     @State private var password = ""
     @State private var microsoftClientID = ""
+    @State private var signature = ""
 
     @State private var isWorking = false
     @State private var errorMessage: String?
@@ -152,6 +153,16 @@ struct AccountsSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                // A TextEditor (rather than a TextField) so Return starts a new line.
+                LabeledContent("Signature") {
+                    TextEditor(text: $signature)
+                        .font(.body)
+                        .frame(height: 70)
+                }
+                Text("Optional. Added to new emails, replies and forwards from this account.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
                 if let errorMessage {
                     Text(errorMessage)
                         .foregroundStyle(.red)
@@ -247,6 +258,7 @@ struct AccountsSettingsView: View {
         smtpHost = account.smtpHost.caseInsensitiveCompare(account.imapHost) == .orderedSame ? "" : account.smtpHost
         smtpPort = account.smtpPort
         microsoftClientID = account.microsoftClientID ?? ""
+        signature = account.signature ?? ""
     }
 
     // Tests the edited settings and saves them. On failure, the account stays as it was.
@@ -284,6 +296,9 @@ struct AccountsSettingsView: View {
             smtpHost: trimmed(smtpHost).isEmpty ? trimmed(imapHost) : trimmed(smtpHost),
             smtpPort: smtpPort
         )
+        // Blank lines at the start or end of a signature are dropped; an empty one means "no signature".
+        let signatureText = signature.trimmingCharacters(in: .whitespacesAndNewlines)
+        account.signature = signatureText.isEmpty ? nil : signatureText
         switch provider {
         case .other:
             break
@@ -331,6 +346,7 @@ struct AccountsSettingsView: View {
         smtpPort = 465
         password = ""
         microsoftClientID = ""
+        signature = ""
     }
 
     private func trimmed(_ text: String) -> String {

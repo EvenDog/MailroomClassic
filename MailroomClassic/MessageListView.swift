@@ -1,6 +1,6 @@
 // The middle pane: the messages in the selected folder, shown as a table with
-// columns, newest first. Unread messages are bold, flagged ones show a red
-// flag. You can select several (⌘-click, ⇧-click), drag them onto a folder,
+// columns, newest first (click the From, Subject or Received header to sort by
+// that instead). Unread messages are bold, flagged ones show a red flag. You can select several (⌘-click, ⇧-click), drag them onto a folder,
 // and right-click for read/unread, flag, move and delete.
 
 import SwiftUI
@@ -18,8 +18,16 @@ struct MessageListView: View {
     let moveTargets: [MailFolder]            // other folders in the same account
     let perform: (MessageAction, [MailMessage]) -> Void   // ContentView decides how to carry these out
 
+    // Which column the list is sorted by, and which way. Clicking a column header changes it.
+    // A KeyPathComparator sorts by one property (`\.dateReceived` means "each message's dateReceived").
+    @State private var sortOrder = [KeyPathComparator(\MailMessage.dateReceived, order: .reverse)]
+
+    private var sortedMessages: [MailMessage] {
+        messages.sorted(using: sortOrder)
+    }
+
     var body: some View {
-        Table(of: MailMessage.self, selection: $selection) {
+        Table(of: MailMessage.self, selection: $selection, sortOrder: $sortOrder) {
             TableColumn("") { message in
                 Image(systemName: message.isRead ? "envelope.open" : "envelope.fill")
                     .foregroundStyle(.secondary)
@@ -34,18 +42,19 @@ struct MessageListView: View {
             }
             .width(16)
 
-            TableColumn("From") { message in
-                Text(message.sender.name ?? message.sender.address)
+            // `value:` is what clicking this column's header sorts by.
+            TableColumn("From", value: \.senderDisplayName) { message in
+                Text(message.senderDisplayName)
                     .fontWeight(message.isRead ? .regular : .bold)
             }
             .width(min: 100, ideal: 150)
 
-            TableColumn("Subject") { message in
+            TableColumn("Subject", value: \.subject) { message in
                 Text(message.subject)
                     .fontWeight(message.isRead ? .regular : .bold)
             }
 
-            TableColumn("Received") { message in
+            TableColumn("Received", value: \.dateReceived) { message in
                 Text(message.dateReceived, format: .dateTime.month().day().hour().minute())
             }
             .width(min: 90, ideal: 120)
@@ -58,7 +67,7 @@ struct MessageListView: View {
             }
             .width(16)
         } rows: {
-            ForEach(messages) { message in
+            ForEach(sortedMessages) { message in
                 // Each row can be dragged; the payload is worked out when the drag starts.
                 TableRow(message)
                     .draggable(dragPayload(startingWith: message))
