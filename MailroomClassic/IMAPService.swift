@@ -55,7 +55,7 @@ enum IMAPService {
             let selection = try await server.selectMailbox(folderPath)
             guard let newest = selection.latest(limit) else { return ([], 0) }   // empty folder
             let infos = try await server.fetchMessageInfosBulk(using: newest)
-            let messages = infos.compactMap { makeMailMessage(from: $0) }   // compactMap skips the nils
+            let messages = infos.compactMap { makeMailMessage(from: $0, account: account, folderPath: folderPath) }   // compactMap skips the nils
             return (messages, selection.messageCount)
         }
     }
@@ -72,7 +72,7 @@ enum IMAPService {
             let newestMatches = matches.sorted { $0.value > $1.value }.prefix(pageSize)
             guard !newestMatches.isEmpty else { return [] }
             let infos = try await server.fetchMessageInfosBulk(using: UIDSet(Array(newestMatches)))
-            return infos.compactMap { makeMailMessage(from: $0) }
+            return infos.compactMap { makeMailMessage(from: $0, account: account, folderPath: folderPath) }
         }
     }
 
@@ -83,20 +83,36 @@ enum IMAPService {
             let infos = try await server.fetchMessageInfos(uidRange: UID(firstNewUID)...)
             // IMAP always returns at least the newest message for "from here on",
             // even if it's older than `firstNewUID`, so filter those out.
-            return infos.compactMap { makeMailMessage(from: $0) }.filter { $0.uid >= firstNewUID }
+            return infos.compactMap { makeMailMessage(from: $0, account: account, folderPath: folderPath) }.filter { $0.uid >= firstNewUID }
         }
     }
 
-    // Downloads one whole message (text, HTML and attachments) and marks it as read on the server.
+    // Downloads a message's text, HTML and inline pictures, and marks it as read on the server.
+    // Attachments are listed but not downloaded; each one downloads when you open it.
     static func fetchFullMessage(for account: AccountSettings, folderPath: String, uid: UInt32) async throws -> OpenMessage {
         try await connection(for: account).run { server in
             try await server.selectMailbox(folderPath)
             guard let info = try await server.fetchMessageInfo(for: UID(uid)) else {
                 return OpenMessage(plainText: "(This message could not be found on the server.)", html: nil, attachments: [])
             }
-            let message = try await server.fetchMessage(from: info)
+            // An email is made of numbered "parts" (text, HTML, each picture, each attachment).
+            // First get the list of parts, then download only the ones needed to show the message.
+            var parts = try await server.fetchStructure(UID(uid))
+            let structure = Message(header: info, parts: parts)
+            let neededSections = Set((structure.bodies + structure.cids).map(\.section))
+            for index in parts.indices where neededSections.contains(parts[index].section) {
+                parts[index].data = try await server.fetchPart(section: parts[index].section, of: UID(uid))
+            }
             try await server.store(flags: [.seen], on: UIDSet(UID(uid)), operation: .add)
-            return makeOpenMessage(from: message)
+            return makeOpenMessage(from: Message(header: info, parts: parts), uid: uid, folderPath: folderPath, account: account)
+        }
+    }
+
+    // Downloads one attachment (one part of a message) and undoes its email encoding.
+    static func fetchAttachment(_ part: MessagePart, uid: UInt32, folderPath: String, account: AccountSettings) async throws -> Data {
+        try await connection(for: account).run { server in
+            try await server.selectMailbox(folderPath)
+            return try await server.fetchPart(section: part.section, of: UID(uid)).decoded(for: part)
         }
     }
 
@@ -189,7 +205,8 @@ enum IMAPService {
     // MARK: - Converting SwiftMail's types into ours
 
     // Returns nil if the server didn't give the message a UID.
-    private static func makeMailMessage(from info: MessageInfo) -> MailMessage? {
+    // `account` and `folderPath` say which folder the message came from.
+    private static func makeMailMessage(from info: MessageInfo, account: AccountSettings, folderPath: String) -> MailMessage? {
         guard let uid = info.uid else { return nil }
         // Turns SwiftMail's address entries into our MailAddress type.
         func addresses(_ entries: [AddressListEntry]) -> [MailAddress] {
@@ -197,6 +214,7 @@ enum IMAPService {
         }
         return MailMessage(
             uid: uid.value,
+            folderID: MailFolder.id(accountID: account.id, path: folderPath),
             sender: addresses(info.fromAddresses).first ?? MailAddress(name: "(Unknown sender)", address: ""),
             replyTo: addresses(info.replyToAddresses),
             toRecipients: addresses(info.toAddresses),
@@ -213,11 +231,19 @@ enum IMAPService {
         )
     }
 
-    private static func makeOpenMessage(from message: Message) -> OpenMessage {
-        let attachments = message.attachments.compactMap { part -> MailAttachment? in
-            // `decodedData()` undoes the email encoding (usually base64) to get the real file.
-            guard let data = part.decodedData() else { return nil }
-            return MailAttachment(filename: part.suggestedFilename, mimeType: part.contentType, data: data)
+    // `uid`, `folderPath` and `account` say where the message lives, so each
+    // attachment knows where to download itself from later.
+    private static func makeOpenMessage(from message: Message, uid: UInt32, folderPath: String, account: AccountSettings) -> OpenMessage {
+        let attachments = message.attachments.map { part in
+            // The server reports the size as sent, and attachments are usually sent
+            // as base64 text, which is about 4/3 the size of the real file.
+            let isBase64 = part.encoding?.lowercased() == "base64"
+            return MailAttachment(
+                filename: part.suggestedFilename,
+                mimeType: part.contentType,
+                approximateSize: part.size.map { isBase64 ? $0 * 3 / 4 : $0 },
+                download: { try await fetchAttachment(part, uid: uid, folderPath: folderPath, account: account) }
+            )
         }
 
         var html = message.htmlBody

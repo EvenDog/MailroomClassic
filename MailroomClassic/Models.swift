@@ -100,7 +100,15 @@ struct MailFolder: Identifiable, Hashable {
     var uidNext: UInt32?
 
     // Folder names are only unique within one account, so combine both.
-    var id: String { "\(accountID)/\(path)" }
+    var id: String { Self.id(accountID: accountID, path: path) }
+
+    static func id(accountID: UUID, path: String) -> String {
+        "\(accountID)/\(path)"
+    }
+
+    // The sidebar's "All Inboxes" row isn't a real folder, so it gets its own ID.
+    // (Real folder IDs always start with an account's UUID, so they can't clash with it.)
+    static let allInboxesID = "all-inboxes"
 }
 
 // One person's email address, optionally with their name.
@@ -124,6 +132,7 @@ struct MailAddress: Hashable, Codable {
 // downloaded separately, only when the message is opened.
 struct MailMessage: Identifiable {
     let uid: UInt32            // the server's ID number for this message within its folder
+    let folderID: MailFolder.ID   // the folder it's in (All Inboxes mixes messages from several)
     let sender: MailAddress
     let replyTo: [MailAddress] // where replies should go, if different from the sender
     let toRecipients: [MailAddress]
@@ -136,7 +145,8 @@ struct MailMessage: Identifiable {
     var isRead: Bool
     var isFlagged: Bool
 
-    var id: UInt32 { uid }
+    // A UID is only unique inside one folder, so the ID includes the folder too.
+    var id: String { "\(folderID)#\(uid)" }
 
     // The sender's name, or their address if there's no name. Shown in the
     // From column, and what that column sorts by.
@@ -150,16 +160,21 @@ struct OpenMessage {
     let attachments: [MailAttachment]
 }
 
-// One file attached to a received email, already downloaded.
+// One file attached to a received email. The file itself isn't downloaded
+// until you open, save or forward it, so big attachments don't slow down reading.
 struct MailAttachment: Identifiable {
     let id = UUID()
     let filename: String
     let mimeType: String       // the file's type, e.g. "application/pdf"
-    let data: Data
+    let approximateSize: Int?  // in bytes, as reported by the server before downloading
+    // Fetches the file from the server. It's a function stored in a property:
+    // the mail code fills it in, and calling `try await attachment.download()` runs it.
+    // `@Sendable` means it's safe to call from background work.
+    let download: @Sendable () async throws -> Data
 
-    // e.g. "1.2 MB"
-    var sizeText: String {
-        ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
+    // e.g. "1.2 MB", or nil if the server didn't say.
+    var sizeText: String? {
+        approximateSize.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
     }
 }
 

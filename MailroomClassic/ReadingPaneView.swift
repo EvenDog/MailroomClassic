@@ -1,19 +1,25 @@
-// The right pane: shows the selected message's header (subject, sender,
-// recipients, date), its attachments, and its body, either formatted (HTML)
-// or plain text. Shows a placeholder when nothing is selected.
+// The reading pane: shows the selected message's header (subject, sender,
+// recipients, date), its attachments (each downloads when you open or save it),
+// and its body, either formatted (HTML) or plain text. Shows a placeholder
+// when nothing is selected.
 
 import SwiftUI
 
 struct ReadingPaneView: View {
+    @Environment(MailStore.self) private var store
+
     // The `?` means "optional": there may be no message selected,
     // and its contents may still be downloading.
     let message: MailMessage?
     let openMessage: OpenMessage?
     let editDraft: (() -> Void)?   // set only when viewing the Drafts folder
 
-    // Whether you clicked "Download Pictures" for this message. Resets for each new message.
-    @State private var allowRemoteContent = false
+    // Whether you clicked "Download Pictures" for this message. ContentView owns it
+    // (and resets it for each new message) because printing needs to know too.
+    @Binding var allowRemoteContent: Bool
+
     @State private var attachmentError: String?
+    @State private var downloadingAttachmentID: MailAttachment.ID?   // shows a spinner on that button
 
     var body: some View {
         // `if let` unwraps the optional: the code inside only runs when
@@ -36,7 +42,6 @@ struct ReadingPaneView: View {
                 }
             }
             .onChange(of: message.id) {
-                allowRemoteContent = false
                 attachmentError = nil
             }
         } else {
@@ -81,14 +86,23 @@ struct ReadingPaneView: View {
                 HStack {
                     ForEach(attachments) { attachment in
                         Button {
-                            perform { try AttachmentFiles.open(attachment) }
+                            download(attachment) { try AttachmentFiles.open($0, named: attachment.filename) }
                         } label: {
-                            Label("\(attachment.filename) (\(attachment.sizeText))", systemImage: "paperclip")
+                            HStack(spacing: 4) {
+                                if downloadingAttachmentID == attachment.id {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "paperclip")
+                                }
+                                // e.g. "report.pdf (1.2 MB)", or just the name if the size is unknown
+                                Text(attachment.sizeText.map { "\(attachment.filename) (\($0))" } ?? attachment.filename)
+                            }
                         }
                         .help("Click to open, or right-click to save")
+                        .disabled(downloadingAttachmentID != nil)
                         .contextMenu {
-                            Button("Open") { perform { try AttachmentFiles.open(attachment) } }
-                            Button("Save As…") { perform { try AttachmentFiles.saveWithPanel(attachment) } }
+                            Button("Open") { download(attachment) { try AttachmentFiles.open($0, named: attachment.filename) } }
+                            Button("Save As…") { download(attachment) { try AttachmentFiles.saveWithPanel($0, named: attachment.filename) } }
                         }
                     }
                 }
@@ -130,13 +144,19 @@ struct ReadingPaneView: View {
         }
     }
 
-    // Runs an attachment action and shows its error, if any, under the attachment buttons.
-    private func perform(_ action: () throws -> Void) {
-        do {
-            try action()
-            attachmentError = nil
-        } catch {
-            attachmentError = "Couldn't save the attachment: \(error.localizedDescription)"
+    // Downloads an attachment, then does something with the file (open or save it).
+    // Any error shows under the attachment buttons.
+    private func download(_ attachment: MailAttachment, then action: @escaping (Data) throws -> Void) {
+        downloadingAttachmentID = attachment.id
+        attachmentError = nil
+        Task {
+            defer { downloadingAttachmentID = nil }
+            do {
+                let data = try await store.data(for: attachment)
+                try action(data)
+            } catch {
+                attachmentError = "Couldn't open “\(attachment.filename)”: \(FriendlyError.message(for: error))"
+            }
         }
     }
 }

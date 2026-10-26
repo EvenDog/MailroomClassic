@@ -12,11 +12,14 @@ It works with:
 
 - Three-pane layout with unread mail in **bold**, unread counts on folders, and paperclip and red-flag columns
 - Click the From, Subject or Received column header to sort by it
+- **All Inboxes**: every account's Inbox in one list, newest first, with the total unread count. Search, delete, flag, Junk and Move To all work there too (Move To only offers folders in the message's own account).
+- Reading pane on the right or at the bottom (**View → Reading Pane**)
+- Print (⌘P) with an Outlook-style header; the print dialog can also save as PDF
 - Formatted (HTML) emails, displayed safely:
   - JavaScript is off
   - Links open in your browser
   - Pictures from the internet are blocked until you click **Download Pictures**, because senders use them to track when you read their mail
-- Attachments: click to open, right-click to save, and attach files when you write. Forwarding keeps the original attachments.
+- Attachments: click to open, right-click to save, and attach files when you write. Forwarding keeps the original attachments. Attachments only download when you open, save or forward them, so big ones don't slow down reading.
 - New Email, Reply, Reply All and Forward, with Outlook-style quoting of the original message
 - Formatted writing (bold, italic, underline, fonts, colors) from the **Format** menu, sent as HTML with a plain-text copy
 - Save Draft (⌘S) to your Drafts folder, and pick up where you left off with **Edit Draft**. Closing an unsent email asks whether to save it.
@@ -46,7 +49,8 @@ It works with:
 
 1. Clone this repository.
 2. Open `MailroomClassic.xcodeproj` in Xcode.
-3. Press **⌘R**. The first build downloads the [SwiftMail](https://github.com/Cocoanetics/SwiftMail) package, so it takes a minute or two.
+3. Choose your own signing team: click the project → **MailroomClassic** target → **Signing & Capabilities** → **Team**. (A free Apple account works. Signing with a real certificate means macOS recognizes each new build as the same app, so it doesn't ask for your Keychain password every time you rebuild.)
+4. Press **⌘R**. The first build downloads the [SwiftMail](https://github.com/Cocoanetics/SwiftMail) package, so it takes a minute or two.
 
 ## Adding accounts
 
@@ -89,10 +93,10 @@ Microsoft only allows OAuth ("Sign in with Microsoft") for IMAP and SMTP. That m
 
 ## Current limitations
 
-- Search looks in one folder at a time
+- Search looks in one folder at a time (or every Inbox, from All Inboxes)
+- Messages can't be moved between accounts
 - Quitting the app (⌘Q) with an unsent email open doesn't ask to save it; only closing its window does
 - A signature is added when the compose window opens, so switching the From account doesn't swap it
-- Opening a message downloads its attachments too, so very large attachments make it slow to open
 
 ## App icon
 

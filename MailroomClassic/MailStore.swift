@@ -20,10 +20,15 @@ final class MailStore {
     private(set) var statusText = "Ready"
     private(set) var isShowingSearchResults = false
 
-    // Which folder `messages` came from, how many we asked for, and how many the folder holds.
-    private var shownFolderID: MailFolder.ID?
+    // Which folder (or All Inboxes) `messages` came from, how many we asked for
+    // from each folder, and how many messages those folders hold in total.
+    private var shownFolderID: String?
     private var messageLimit = IMAPService.pageSize
     private var totalMessageCount = 0
+
+    // Attachments of the open message that are already downloaded, so opening one
+    // twice doesn't download it twice. Emptied when another message is opened.
+    private var downloadedAttachments: [MailAttachment.ID: Data] = [:]
 
     // True when the folder has messages older than the ones on screen.
     var hasOlderMessages: Bool {
@@ -118,49 +123,94 @@ final class MailStore {
 
     // Shows the newest messages in a folder (the first page of them).
     func loadMessages(in folder: MailFolder) async {
-        if shownFolderID != folder.id {
+        await loadMessages(from: [folder], viewID: folder.id)
+    }
+
+    // Shows the newest messages from one or more folders, mixed together newest
+    // first. Several folders means All Inboxes. `viewID` is the sidebar row being
+    // shown (a folder's ID, or MailFolder.allInboxesID).
+    func loadMessages(from folders: [MailFolder], viewID: String) async {
+        if shownFolderID != viewID {
             messages = []
             messageLimit = IMAPService.pageSize
         }
-        shownFolderID = folder.id
+        shownFolderID = viewID
         isShowingSearchResults = false
-        await fetchMessages(in: folder, activity: "Loading \(folder.displayName)…")
+        let name = folders.count == 1 ? folders[0].displayName : "All Inboxes"
+        await fetchMessages(from: folders, viewID: viewID, activity: "Loading \(name)…")
     }
 
     // "Show older messages": loads another page further back in time.
-    func loadOlderMessages(in folder: MailFolder) async {
+    func loadOlderMessages(from folders: [MailFolder], viewID: String) async {
         messageLimit += IMAPService.pageSize
-        await fetchMessages(in: folder, activity: "Loading older messages…")
+        await fetchMessages(from: folders, viewID: viewID, activity: "Loading older messages…")
     }
 
     // Replaces the message list with the server's search results for `query`.
-    func search(_ query: String, in folder: MailFolder) async {
-        guard let account = account(for: folder) else { return }
-        await reportingErrors("Searching \(folder.displayName)…", server: account.imapHost) {
-            let results = try await IMAPService.searchMessages(for: account, folderPath: folder.path, query: query)
-            guard shownFolderID == folder.id else { return }   // you switched folders meanwhile
-            messages = results.sorted { $0.dateReceived > $1.dateReceived }
-            isShowingSearchResults = true
+    func search(_ query: String, in folders: [MailFolder], viewID: String) async {
+        let name = folders.count == 1 ? folders[0].displayName : "All Inboxes"
+        let results = await collectMessages(from: folders, activity: "Searching \(name)…") { account, folder in
+            try await IMAPService.searchMessages(for: account, folderPath: folder.path, query: query)
         }
-        if isShowingSearchResults {
+        guard let results, shownFolderID == viewID else { return }   // failed, or you switched folders meanwhile
+        messages = results.sorted { $0.dateReceived > $1.dateReceived }
+        isShowingSearchResults = true
+        if statusText == "Ready" {   // don't hide an error about one of the accounts
             statusText = messages.count == 1 ? "1 message found" : "\(messages.count) messages found"
         }
     }
 
-    private func fetchMessages(in folder: MailFolder, activity: String) async {
-        guard let account = account(for: folder) else { return }
-        await reportingErrors(activity, server: account.imapHost) {
-            let page = try await IMAPService.fetchLatestMessages(for: account, folderPath: folder.path, limit: messageLimit)
-            // If you clicked another folder while this was loading, throw this result away.
-            guard !Task.isCancelled, shownFolderID == folder.id else { return }
-            messages = page.messages.sorted { $0.dateReceived > $1.dateReceived }
-            totalMessageCount = page.totalCount
+    private func fetchMessages(from folders: [MailFolder], viewID: String, activity: String) async {
+        var totalCount = 0
+        let limit = messageLimit
+        let fetched = await collectMessages(from: folders, activity: activity) { account, folder in
+            let page = try await IMAPService.fetchLatestMessages(for: account, folderPath: folder.path, limit: limit)
+            totalCount += page.totalCount
+            return page.messages
         }
+        // If you clicked another folder while this was loading, throw this result away.
+        guard let fetched, !Task.isCancelled, shownFolderID == viewID else { return }
+        // With several folders, keep only the newest `limit` of them all.
+        messages = Array(fetched.sorted { $0.dateReceived > $1.dateReceived }.prefix(limit))
+        totalMessageCount = totalCount
+    }
+
+    // Runs `fetch` on each folder in turn and returns everything it found, while
+    // showing `activity` in the status bar. If some accounts fail, the others'
+    // messages are still returned, and the status bar says which failed.
+    // Returns nil if every folder failed (or the work was cancelled).
+    private func collectMessages(
+        from folders: [MailFolder],
+        activity: String,
+        fetch: (AccountSettings, MailFolder) async throws -> [MailMessage]
+    ) async -> [MailMessage]? {
+        statusText = activity
+        var found: [MailMessage] = []
+        var problems: [String] = []
+        for folder in folders {
+            guard let account = account(for: folder) else { continue }
+            do {
+                found += try await fetch(account, folder)
+            } catch is CancellationError {
+                return nil   // you clicked something else; not a real error
+            } catch {
+                let problem = FriendlyError.message(for: error, server: account.imapHost)
+                problems.append(folders.count == 1 ? problem : "\(account.displayName): \(problem)")
+            }
+        }
+        statusText = problems.isEmpty ? "Ready" : "Error: " + problems.joined(separator: " · ")
+        return problems.count == folders.count && !folders.isEmpty ? nil : found
+    }
+
+    // The folder a message is in, e.g. to know which account to ask about it.
+    func folder(of message: MailMessage) -> MailFolder? {
+        allFolders.first { $0.id == message.folderID }
     }
 
     // Downloads a whole message (text, HTML, attachments) and marks it as read.
     func open(_ message: MailMessage, in folder: MailFolder) async {
         openMessage = nil
+        downloadedAttachments = [:]
         guard let account = account(for: folder) else { return }
         await reportingErrors("Opening message…", server: account.imapHost) {
             let contents = try await IMAPService.fetchFullMessage(for: account, folderPath: folder.path, uid: message.uid)
@@ -179,6 +229,36 @@ final class MailStore {
 
     func closeMessage() {
         openMessage = nil
+    }
+
+    // Downloads one of the open message's attachments (or reuses the earlier download).
+    func data(for attachment: MailAttachment) async throws -> Data {
+        if let alreadyDownloaded = downloadedAttachments[attachment.id] { return alreadyDownloaded }
+        statusText = "Downloading \(attachment.filename)…"
+        defer { statusText = "Ready" }
+        let data = try await attachment.download()
+        downloadedAttachments[attachment.id] = data
+        return data
+    }
+
+    // Downloads attachments and saves each one as a temporary file, for Forward and
+    // Edit Draft (the compose window attaches files from disk). Any that fail are
+    // left out, and the status bar says which.
+    func downloadToTemporaryFiles(_ attachments: [MailAttachment]) async -> [URL] {
+        var urls: [URL] = []
+        var failedNames: [String] = []
+        for attachment in attachments {
+            do {
+                let data = try await data(for: attachment)
+                urls.append(try AttachmentFiles.saveToTemporaryFolder(data, named: attachment.filename))
+            } catch {
+                failedNames.append(attachment.filename)
+            }
+        }
+        if !failedNames.isEmpty {
+            statusText = "Couldn't download: \(failedNames.joined(separator: ", "))"
+        }
+        return urls
     }
 
     // MARK: - Changing mail

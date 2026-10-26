@@ -27,8 +27,17 @@ enum FriendlyError {
 
         if let imapError = error as? IMAPError {
             switch imapError {
-            case .loginFailed, .authFailed:
-                return "\(placeAtStart) rejected the email address or password."
+            case .loginFailed(let serverReply), .authFailed(let serverReply):
+                // Gmail says this when it's given your normal Google password instead of an app password.
+                if serverReply.localizedCaseInsensitiveContains("application-specific password") {
+                    return "Gmail needs an app password here, not your normal Google password. Create one at myaccount.google.com/apppasswords and paste it in."
+                }
+                // Otherwise include the server's own words: they often say exactly what's wrong.
+                // SwiftMail wraps the reply as `no(…)` or `bad(…)`; keep just what's inside.
+                let reply = serverReply
+                    .replacingOccurrences(of: #"^(no|bad)\((.*)\)$"#, with: "$2", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return "\(placeAtStart) rejected the email address or password." + (reply.isEmpty ? "" : " The server said: “\(reply)”")
             case .timeout:
                 return "\(placeAtStart) took too long to answer."
             default:

@@ -206,6 +206,12 @@ struct AccountsSettingsView: View {
         }
     }
 
+    // The password to use. Google shows app passwords in groups of four letters
+    // ("abcd efgh ijkl mnop"); the spaces aren't part of it, so Gmail's are removed.
+    private var typedPassword: String {
+        provider == .gmail ? password.filter { !$0.isWhitespace } : password
+    }
+
     private var passwordPrompt: Text? {
         editingAccount == nil ? nil : Text("Leave blank to keep the current one")
     }
@@ -268,7 +274,7 @@ struct AccountsSettingsView: View {
         var updated = makeAccount()
         updated.id = original.id   // same account, new settings
         do {
-            var newSecret: String? = trimmed(password).isEmpty ? nil : password
+            var newSecret: String? = trimmed(password).isEmpty ? nil : typedPassword
             if updated.provider == .office365 {
                 newSecret = editNeedsMicrosoftSignIn
                     ? try await MicrosoftOAuth.signIn(account: updated, using: webAuthenticationSession)
@@ -322,7 +328,7 @@ struct AccountsSettingsView: View {
         do {
             let secret = provider == .office365
                 ? try await MicrosoftOAuth.signIn(account: account, using: webAuthenticationSession)
-                : password
+                : typedPassword
             try await store.addAccount(account, secret: secret)
             clearForm()
         } catch {

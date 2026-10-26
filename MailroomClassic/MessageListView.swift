@@ -5,17 +5,18 @@
 
 import SwiftUI
 
-// The things you can do to messages from the right-click menu.
+// The things you can do to messages (from the toolbar or the right-click menu).
 enum MessageAction {
     case markRead, markUnread, flag, clearFlag, delete
+    case junk   // to the Junk folder, or back to the Inbox if already in Junk
     case move(to: MailFolder)
 }
 
 struct MessageListView: View {
     let messages: [MailMessage]   // already sorted newest first by MailStore
     @Binding var selection: Set<MailMessage.ID>
-    let sourceFolder: MailFolder?            // the folder being shown (for drag and drop)
-    let moveTargets: [MailFolder]            // other folders in the same account
+    // The folders the given messages could be moved to (for "Move To").
+    let moveTargets: ([MailMessage]) -> [MailFolder]
     let perform: (MessageAction, [MailMessage]) -> Void   // ContentView decides how to carry these out
 
     // Which column the list is sorted by, and which way. Clicking a column header changes it.
@@ -90,12 +91,13 @@ struct MessageListView: View {
                     Button("Clear Flag") { perform(.clearFlag, chosen) }
                 }
                 Divider()
+                let targets = moveTargets(chosen)
                 Menu("Move To") {
-                    ForEach(moveTargets) { folder in
+                    ForEach(targets) { folder in
                         Button(folder.displayName) { perform(.move(to: folder), chosen) }
                     }
                 }
-                .disabled(moveTargets.isEmpty)
+                .disabled(targets.isEmpty)
                 Divider()
                 Button("Delete", role: .destructive) { perform(.delete, chosen) }
             }
@@ -105,25 +107,23 @@ struct MessageListView: View {
     // What gets dragged: every selected message if you drag one of them,
     // otherwise just the row you grabbed.
     private func dragPayload(startingWith message: MailMessage) -> String {
-        let uids = selection.contains(message.id) ? Array(selection) : [message.uid]
-        return MessageDrag.payload(uids: uids, from: sourceFolder?.id ?? "")
+        MessageDrag.payload(messageIDs: selection.contains(message.id) ? Array(selection) : [message.id])
     }
 }
 
-// The text that travels with a drag: "mailroom-classic-move|uid,uid|source folder ID".
-// The folder ID goes last because it may itself contain "|".
+// The text that travels with a drag: a first line saying it's ours, then one
+// message ID per line. (Message IDs can contain "/" and "|" but never a new line.)
 enum MessageDrag {
     private static let prefix = "mailroom-classic-move"
 
-    static func payload(uids: [UInt32], from folderID: String) -> String {
-        "\(prefix)|\(uids.map(String.init).joined(separator: ","))|\(folderID)"
+    static func payload(messageIDs: [MailMessage.ID]) -> String {
+        ([prefix] + messageIDs).joined(separator: "\n")
     }
 
     // Reads a payload back. Returns nil for anything else (e.g. text dragged from another app).
-    static func parse(_ text: String) -> (uids: [UInt32], sourceFolderID: String)? {
-        let parts = text.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count == 3, parts[0] == prefix else { return nil }
-        let uids = parts[1].split(separator: ",").compactMap { UInt32($0) }
-        return uids.isEmpty ? nil : (uids, String(parts[2]))
+    static func parse(_ text: String) -> [MailMessage.ID]? {
+        let lines = text.split(separator: "\n").map(String.init)
+        guard lines.first == prefix, lines.count > 1 else { return nil }
+        return Array(lines.dropFirst())
     }
 }

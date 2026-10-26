@@ -1,6 +1,6 @@
-// The left pane: every account, with its folders listed underneath, like the
-// folder tree in classic Outlook. Clicking a folder selects it, and dropping
-// dragged messages onto a folder moves them there.
+// The left pane: "All Inboxes" at the top, then every account with its folders
+// listed underneath, like the folder tree in classic Outlook. Clicking a folder
+// selects it, and dropping dragged messages onto a folder moves them there.
 
 import SwiftUI
 
@@ -12,10 +12,16 @@ struct FolderSidebarView: View {
     @Binding var selectedFolderID: MailFolder.ID?
 
     // Called when messages are dropped on a folder. Returns whether the drop was accepted.
-    let dropMessages: (_ uids: [UInt32], _ sourceFolderID: String, _ destination: MailFolder) -> Bool
+    let dropMessages: (_ messageIDs: [MailMessage.ID], _ destination: MailFolder) -> Bool
 
     var body: some View {
         List(selection: $selectedFolderID) {
+            if !store.accounts.isEmpty {
+                // Every account's Inbox in one list. Its badge is the total unread.
+                Label("All Inboxes", systemImage: "tray.2")
+                    .badge(store.unreadInboxCount)
+                    .tag(MailFolder.allInboxesID)
+            }
             ForEach(store.accounts) { account in
                 Section(account.emailAddress) {
                     ForEach(store.foldersByAccount[account.id] ?? []) { folder in
@@ -24,8 +30,8 @@ struct FolderSidebarView: View {
                             .tag(folder.id)              // what gets stored when this row is selected
                             // Accept messages dragged from the message list.
                             .dropDestination(for: String.self) { items, _ in
-                                guard let drag = items.first.flatMap({ MessageDrag.parse($0) }) else { return false }
-                                return dropMessages(drag.uids, drag.sourceFolderID, folder)
+                                guard let messageIDs = items.first.flatMap({ MessageDrag.parse($0) }) else { return false }
+                                return dropMessages(messageIDs, folder)
                             }
                     }
                 }
