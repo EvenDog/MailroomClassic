@@ -1,0 +1,18 @@
+# Files git should never track.
+
+# macOS Finder clutter
+.DS_Store
+
+# Xcode per-user settings and build output
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+
+# Swift Package Manager working files
+.build/
+.swiftpm/
+
+# Secrets: OAuth app IDs live here (a Config.example file will be committed instead)
+Config.xcconfig
+Secrets.swift
