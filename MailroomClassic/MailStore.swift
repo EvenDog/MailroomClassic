@@ -27,6 +27,7 @@ final class MailStore {
     // one that's still running (which could announce the same new mail twice).
     private var accountsBeingChecked: Set<UUID> = []
     private(set) var isShowingSearchResults = false
+    private var activeSearch: String?   // the search being shown, so a slow server reply for an old one is ignored
 
     // Which sidebar row (a folder, or All Inboxes) `messages` shows, and the real folders behind it.
     private var shownFolderID: String?
@@ -117,6 +118,20 @@ final class MailStore {
 
     // MARK: - Reading mail
 
+    // At launch: shows each account's folders from the last check, so the
+    // sidebar and the saved mail appear straight away, even with no internet.
+    // The next check replaces them with fresh ones.
+    func showSavedFolders() async {
+        guard let saved = try? await MailCache.folderLists() else { return }
+        for account in accounts where foldersByAccount[account.id] == nil {
+            guard var folders = saved[account.id] else { continue }
+            // Forget the saved "next message ID"s: mail that came in while the app
+            // was closed shouldn't pop up as a pile of new-mail alerts at launch.
+            for index in folders.indices { folders[index].uidNext = nil }
+            foldersByAccount[account.id] = folders
+        }
+    }
+
     // Reloads every account's folder list and unread counts ("Send/Receive"),
     // then starts updating the local copy in the background.
     func refreshAllFolders() async {
@@ -148,6 +163,7 @@ final class MailStore {
                 }
             }
             foldersByAccount[account.id] = folders
+            try? await MailCache.saveFolderList(folders, for: account.id)
 
             for folder in folders {   // already sorted Inbox first
                 // `try?`: if one folder can't be counted, keep its old count and carry on.
@@ -165,6 +181,8 @@ final class MailStore {
                 let arrivals = (try? await IMAPService.fetchNewMessages(for: account, folderPath: folder.path, firstNewUID: oldNext)) ?? []
                 NewMailNotifier.announce(arrivals.filter { !$0.isRead }, account: account)
             }
+            // Save the fresh counts for next launch. (`try?`: not worth failing the check over.)
+            try? await MailCache.saveFolderList(foldersByAccount[account.id] ?? [], for: account.id)
         }
     }
 
@@ -186,6 +204,7 @@ final class MailStore {
         shownFolderID = viewID
         shownFolders = folders
         isShowingSearchResults = false
+        activeSearch = nil
         await showSavedMessages()
         for folder in folders {
             await sync(folder)
@@ -272,16 +291,34 @@ final class MailStore {
         !isShowingSearchResults && shownFolders.contains { $0.id == folder.id }
     }
 
-    // Replaces the message list with the server's search results for `query`.
+    // Replaces the message list with search results for `query`, in two steps:
+    // first, instantly, the saved messages whose sender, recipients or subject
+    // match; then the server's results are added, which also search the message
+    // text and mail older than the offline window (and work even if nothing is saved yet).
     func search(_ query: String, in folders: [MailFolder], viewID: String) async {
+        activeSearch = query
+        if let saved = try? await MailCache.search(query, inFolders: folders.map(\.id)),
+           shownFolderID == viewID, activeSearch == query {
+            messages = saved
+            isShowingSearchResults = true
+        }
+
         let name = folders.count == 1 ? folders[0].displayName : "All Inboxes"
-        let results = await collectMessages(from: folders, activity: "Searching \(name)…") { account, folder in
+        let fromServer = await collectMessages(from: folders, activity: "Searching \(name) on the server…") { account, folder in
             try await IMAPService.searchMessages(for: account, folderPath: folder.path, query: query)
         }
-        guard let results, shownFolderID == viewID else { return }   // failed, or you switched folders meanwhile
-        messages = results.sorted { $0.dateReceived > $1.dateReceived }
-        isShowingSearchResults = true
-        if statusText == "Ready" {   // don't hide an error about one of the accounts
+        // Stop if you switched folders or searched again meanwhile.
+        guard shownFolderID == viewID, activeSearch == query else { return }
+        if let fromServer {
+            // Combine both lists. A message in both appears once, with the server's (newer) read/flag status.
+            var combined = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            for message in fromServer {
+                combined[message.id] = message
+            }
+            messages = combined.values.sorted { $0.dateReceived > $1.dateReceived }
+            isShowingSearchResults = true
+        }
+        if statusText == "Ready" {   // don't hide an error (the saved results still show if the server failed)
             statusText = messages.count == 1 ? "1 message found" : "\(messages.count) messages found"
         }
     }

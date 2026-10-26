@@ -129,6 +129,9 @@ struct ContentView: View {
             if NewMailNotifier.isEnabled {
                 NewMailNotifier.requestPermission()
             }
+            // Show the folders saved last time first, so you can read straight away.
+            await store.showSavedFolders()
+            selectFirstInboxIfNeeded()
             await store.refreshAllFolders()
             selectFirstInboxIfNeeded()
         }

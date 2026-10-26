@@ -1,7 +1,8 @@
 // The middle pane: the messages in the selected folder, shown as a table with
 // columns, newest first (click the From, Subject or Received header to sort by
 // that instead). Unread messages are bold, flagged ones show a red flag. You can select several (⌘-click, ⇧-click), drag them onto a folder,
-// and right-click for read/unread, flag, move and delete.
+// and right-click for read/unread, flag, move and delete. When sorted by From
+// or Subject, typing a letter jumps to the first message starting with it.
 
 import SwiftUI
 
@@ -27,7 +28,49 @@ struct MessageListView: View {
         messages.sorted(using: sortOrder)
     }
 
+    // Type-to-select: the letters typed so far, and when the last one was typed.
+    @State private var typedText = ""
+    @State private var lastTypedAt = Date.distantPast
+
     var body: some View {
+        // ScrollViewReader lets us scroll the table to a row (`proxy.scrollTo`).
+        ScrollViewReader { proxy in
+            messageTable
+                // Runs when a letter or number is typed while the table is focused.
+                .onKeyPress(characters: .alphanumerics, phases: .down) { keyPress in
+                    jumpToMessage(startingWith: keyPress, scroll: proxy)
+                }
+        }
+    }
+
+    // Type-to-select, like Finder and classic Outlook: selects the first message
+    // whose sender (or subject, if sorted by that) starts with the typed letters.
+    // Letters typed within a second of each other add up ("d", "a" → "da").
+    // Returns whether the key press was used, so others (like ⌘A) still work.
+    private func jumpToMessage(startingWith keyPress: KeyPress, scroll proxy: ScrollViewProxy) -> KeyPress.Result {
+        guard keyPress.modifiers.isDisjoint(with: [.command, .control, .option]) else { return .ignored }
+        // The column the list is sorted by decides what the letters are matched against.
+        let textOf: (MailMessage) -> String
+        switch sortOrder.first?.keyPath {
+        case \MailMessage.senderDisplayName: textOf = \.senderDisplayName
+        case \MailMessage.subject: textOf = \.subject
+        default: return .ignored   // sorted by date: letters mean nothing
+        }
+
+        typedText = Date().timeIntervalSince(lastTypedAt) < 1 ? typedText + keyPress.characters : keyPress.characters
+        lastTypedAt = Date()
+        // `.anchored` means "at the start"; the others ignore capitals and accents.
+        let match = sortedMessages.first {
+            textOf($0).range(of: typedText, options: [.anchored, .caseInsensitive, .diacriticInsensitive]) != nil
+        }
+        if let match {
+            selection = [match.id]
+            proxy.scrollTo(match.id)
+        }
+        return .handled
+    }
+
+    private var messageTable: some View {
         Table(of: MailMessage.self, selection: $selection, sortOrder: $sortOrder) {
             TableColumn("") { message in
                 Image(systemName: message.isRead ? "envelope.open" : "envelope.fill")

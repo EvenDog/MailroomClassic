@@ -1,6 +1,7 @@
 // Keeps one IMAP connection open per account, so clicking around doesn't have
 // to connect and log in every time. An IMAP connection can only do one thing at
 // once, so jobs wait in line and run one at a time, in the order they arrived.
+// If the server is too slow to answer, a job gets one more try on a fresh connection.
 
 import Foundation
 import SwiftMail
@@ -22,12 +23,21 @@ final class AccountConnection {
     }
 
     // Runs `job` on this account's connection once every job ahead of it is done.
-    // Returns whatever `job` returns, or throws its error.
-    func run<Result: Sendable>(_ job: @escaping (IMAPServer) async throws -> Result) async throws -> Result {
+    // Returns whatever `job` returns, or throws its error. Pass `retryOnTimeout: false`
+    // for jobs that mustn't run twice (like saving a copy of a message).
+    func run<Result: Sendable>(retryOnTimeout: Bool = true,
+                               _ job: @escaping (IMAPServer) async throws -> Result) async throws -> Result {
         let jobAhead = lastJob
         let thisJob = Task {
             await jobAhead?.value   // wait our turn
-            return try await self.perform(job)
+            do {
+                return try await self.perform(job)
+            } catch IMAPError.timeout where retryOnTimeout {
+                // SwiftMail gives some requests (like logging in) only 5 seconds, and Gmail
+                // is sometimes slower than that. `perform` has already thrown the stuck
+                // connection away, so try once more on a fresh one before giving up.
+                return try await self.perform(job)
+            }
         }
         // The next job waits on this one, whether it succeeds or fails.
         lastJob = Task { _ = await thisJob.result }

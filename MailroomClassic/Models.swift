@@ -45,9 +45,11 @@ struct AccountSettings: Codable, Identifiable, Hashable {
 }
 
 // What a folder is for. Decides its icon, its place in the list, and which
-// folder Delete moves messages into.
-enum FolderRole: Hashable {
+// folder Delete moves messages into. `String` gives each case a text name
+// ("inbox", "sent"…), which is how it's saved on disk.
+enum FolderRole: String, Codable, Hashable {
     case inbox, drafts, sent, trash, junk, archive, other
+    case allMail   // Gmail's "All Mail": every message in the account, whatever its labels
 
     // Guesses the role from a folder's name, for servers that don't label their folders.
     init(name: String) {
@@ -69,9 +71,13 @@ enum FolderRole: Hashable {
         case .trash: "trash"
         case .junk: "xmark.bin"
         case .archive: "archivebox"
+        case .allMail: "tray.full"
         case .other: "folder"
         }
     }
+
+    // All Mail's unread count includes every unread message in the account, so it isn't useful.
+    var showsUnreadCount: Bool { self != .allMail }
 
     // Classic Outlook order: Inbox, Drafts, Sent, Deleted, Junk, then everything else.
     var sortRank: Int {
@@ -81,7 +87,7 @@ enum FolderRole: Hashable {
         case .sent: 2
         case .trash: 3
         case .junk: 4
-        case .archive, .other: 5
+        case .allMail, .archive, .other: 5
         }
     }
 }
@@ -89,12 +95,16 @@ enum FolderRole: Hashable {
 // One folder (IMAP calls them "mailboxes") inside an account.
 // `Identifiable` means each item has a unique `id`, which SwiftUI uses to keep
 // track of rows in lists and to remember which one is selected.
-struct MailFolder: Identifiable, Hashable {
+// `Codable` lets the folder list be saved on this Mac (see MailCache).
+struct MailFolder: Identifiable, Hashable, Codable {
     let accountID: UUID
     let path: String           // the folder's name on the server, e.g. "INBOX.Sent"
     let displayName: String    // the friendly name we show, e.g. "Sent"
     let role: FolderRole
     var unreadCount: Int
+    // The character the server puts between a folder and the folders inside it,
+    // e.g. "/" in "Jobs/Arrow". Nil if the server doesn't say.
+    var hierarchyDelimiter: String? = nil
     // The ID the server will give the next message that arrives. If it goes up
     // between checks, new mail has arrived. (Nil if the server doesn't say.)
     var uidNext: UInt32?

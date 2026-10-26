@@ -11,7 +11,7 @@ It works with:
 ## Features
 
 - Three-pane layout with unread mail in **bold**, unread counts on folders, and paperclip and red-flag columns
-- Click the From, Subject or Received column header to sort by it
+- Click the From, Subject or Received column header to sort by it. When sorted by From or Subject, type a letter to jump to it
 - **All Inboxes**: every account's Inbox in one list, newest first, with the total unread count. Search, delete, flag, Junk and Move To all work there too (Move To only offers folders in the message's own account).
 - Reading pane on the right or at the bottom (**View → Reading Pane**)
 - Print (⌘P) with an Outlook-style header; the print dialog can also save as PDF
@@ -25,8 +25,10 @@ It works with:
 - Save Draft (⌘S) to your Drafts folder, and pick up where you left off with **Edit Draft**. Closing an unsent email asks whether to save it.
 - A signature for each account (Settings → Edit), added to new emails, replies and forwards
 - The To and Cc fields suggest people you've emailed before, or whose mail you've opened
-- Search the current folder (sender, subject and message text), searched on the server
-- **Keeps the last 12 months of mail headers on your Mac** (like Outlook's offline file), so folders open instantly. It syncs with the server in the background: your Inboxes after every check, and every other folder at least every 30 minutes. Message bodies and attachments still download when you open them.
+- Search: matches in sender, recipients and subject appear instantly from the saved copy, then the server's results (which also search the message text, and older mail) are added
+- Folders inside folders (like Gmail's nested labels) show as a tree you can expand, and each account can be collapsed (hover over its name)
+- Trusts the server's own labels for Drafts, Sent, Trash and Junk, so a folder you named "Drafts" isn't mistaken for the real one; Gmail's All Mail shows no unread count
+- **Keeps the last 12 months of mail headers on your Mac** (like Outlook's offline file), so folders open instantly. Your folder list and unread counts are saved too, so the app opens straight to your mail, even with no internet. It syncs with the server in the background: your Inboxes after every check, and every other folder at least every 30 minutes. Message bodies and attachments still download when you open them.
 - **Show Older Messages** fetches mail older than 12 months from the server, 50 at a time
 - Mark as read/unread (⇧⌘U), flag (⇧⌘L), and Delete. Delete moves mail to Trash; deleting from Trash removes it for good, after asking.
 - Select several messages at once (⌘-click, ⇧-click) to delete, move, flag or mark them together

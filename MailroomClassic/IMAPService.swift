@@ -26,13 +26,19 @@ enum IMAPService {
     static func fetchFolders(for account: AccountSettings) async throws -> [MailFolder] {
         try await connection(for: account).run { server in
             var folders: [MailFolder] = []
-            for mailbox in try await server.listMailboxes() where mailbox.isSelectable {
+            let mailboxes = try await server.listMailboxes()
+            // If the server labels any of its special folders (Gmail, MXroute and Office 365 do),
+            // trust those labels rather than guessing from names, so a folder you made
+            // called "Drafts" isn't mistaken for the real one.
+            let serverLabelsFolders = mailboxes.contains { !$0.attributes.isDisjoint(with: specialUseAttributes) }
+            for mailbox in mailboxes where mailbox.isSelectable {
                 folders.append(MailFolder(
                     accountID: account.id,
                     path: mailbox.name,
                     displayName: friendlyName(for: mailbox),
-                    role: role(of: mailbox),
+                    role: role(of: mailbox, guessFromName: !serverLabelsFolders),
                     unreadCount: 0,
+                    hierarchyDelimiter: mailbox.hierarchyDelimiter,
                     uidNext: nil
                 ))
             }
@@ -49,10 +55,10 @@ enum IMAPService {
     // new message will get (used to notice new mail), without opening the folder.
     static func fetchCounts(of folder: MailFolder, account: AccountSettings) async throws -> (unread: Int, uidNext: UInt32?) {
         try await connection(for: account).run { server in
-            // Some servers give out-of-date counts for the folder that's currently open,
-            // so close it first. (`try?` because there may be no folder open.)
-            try? await server.unselectMailbox()
             // STATUS asks for a folder's counts without opening it.
+            // (This used to close the open folder first, in case a server gave stale
+            // counts for it, but Gmail sometimes took over SwiftMail's 5-second limit
+            // to do that, which dropped the connection.)
             let status = try await server.mailboxStatus(folder.path)
             return (status.unseenCount ?? 0, status.uidNext?.value)
         }
@@ -196,7 +202,8 @@ enum IMAPService {
 
     // Saves a copy of a sent email into a folder (for servers that don't do it themselves).
     static func saveCopy(of email: Email, to folderPath: String, account: AccountSettings) async throws {
-        try await connection(for: account).run { server in
+        // No retry: if the first try saved it but the reply was slow, a retry would save a second copy.
+        try await connection(for: account).run(retryOnTimeout: false) { server in
             _ = try await server.append(email: email, to: folderPath, flags: [.seen])
         }
     }
@@ -204,7 +211,7 @@ enum IMAPService {
     // Saves an unfinished email into the Drafts folder and returns its new UID
     // (so a later save can replace it), if the server reports one.
     static func saveDraft(_ email: Email, to draftsPath: String, account: AccountSettings) async throws -> UInt32? {
-        try await connection(for: account).run { server in
+        try await connection(for: account).run(retryOnTimeout: false) { server in   // no retry, as in saveCopy
             let result = try await server.append(email: email, to: draftsPath, flags: [.draft, .seen])
             return result.firstUID?.value
         }
@@ -323,15 +330,21 @@ enum IMAPService {
 
     // Uses the server's "special-use" labels (\Sent, \Trash…) when present,
     // otherwise guesses from the folder's name.
-    private static func role(of mailbox: Mailbox.Info) -> FolderRole {
+    // The "special-use" labels a server can put on its folders.
+    private static let specialUseAttributes: Mailbox.Info.Attributes = [.drafts, .sent, .trash, .junk, .archive, .all]
+
+    // `guessFromName` is false when the server labels its special folders, so
+    // only those labels count (the Inbox is always called INBOX).
+    private static func role(of mailbox: Mailbox.Info, guessFromName: Bool) -> FolderRole {
         let attributes = mailbox.attributes
-        if attributes.contains(.inbox) { return .inbox }
+        if attributes.contains(.inbox) || mailbox.name.uppercased() == "INBOX" { return .inbox }
         if attributes.contains(.drafts) { return .drafts }
         if attributes.contains(.sent) { return .sent }
         if attributes.contains(.trash) { return .trash }
         if attributes.contains(.junk) { return .junk }
         if attributes.contains(.archive) { return .archive }
-        return FolderRole(name: friendlyName(for: mailbox))
+        if attributes.contains(.all) { return .allMail }
+        return guessFromName ? FolderRole(name: friendlyName(for: mailbox)) : .other
     }
 
     // Turns "INBOX" into "Inbox", "INBOX.Sent" into "Sent", and "[Gmail]/Sent Mail" into "Sent Mail".

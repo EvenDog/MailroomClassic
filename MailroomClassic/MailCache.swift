@@ -1,6 +1,6 @@
-// The local copy of your mail: a database file on this Mac holding the headers
-// (sender, subject, date, read/flagged…) of the last 12 months of messages in
-// every folder, like classic Outlook's offline file. The message list reads
+// The local copy of your mail: a database file on this Mac holding each account's
+// folder list and the headers (sender, subject, date, read/flagged…) of the last
+// 12 months of messages in every folder, like classic Outlook's offline file. The message list reads
 // from here, so folders open instantly; MailSync keeps it matching the server.
 // It uses GRDB, a Swift library on top of SQLite (the database engine built
 // into macOS). A "table" is like a spreadsheet: one row per saved item.
@@ -88,6 +88,14 @@ enum MailCache {
                 table.column("uidValidity", .integer).notNull()
             }
         }
+        migrator.registerMigration("v2") { db in
+            // Each account's folder list, so the sidebar can appear at launch before
+            // (or without) connecting. One row per account; the folders are JSON text.
+            try db.create(table: StoredFolderList.databaseTableName) { table in
+                table.primaryKey("accountID", .text)
+                table.column("folders", .text).notNull()
+            }
+        }
         return migrator
     }
 
@@ -101,6 +109,46 @@ enum MailCache {
                 .order(Column("dateReceived").desc)
                 .fetchAll(db)
                 .map(\.mailMessage)
+        }
+    }
+
+    // Saved messages in these folders whose subject, sender or recipients
+    // (name or address) contain `query`, ignoring letter case; newest first.
+    static func search(_ query: String, inFolders folderIDs: [MailFolder.ID]) async throws -> [MailMessage] {
+        // In LIKE, % means "anything" and _ means "any one character". Put a \ before any
+        // the query contains, so they're matched as ordinary characters.
+        let escaped = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        // Addresses are stored as JSON, so json_extract / json_each look inside them.
+        let matches = """
+            subject LIKE :pattern ESCAPE '\\'
+            OR json_extract(sender, '$.name') LIKE :pattern ESCAPE '\\'
+            OR json_extract(sender, '$.address') LIKE :pattern ESCAPE '\\'
+            OR EXISTS (SELECT 1 FROM json_each(toRecipients) WHERE json_extract(value, '$.name') LIKE :pattern ESCAPE '\\'
+                       OR json_extract(value, '$.address') LIKE :pattern ESCAPE '\\')
+            OR EXISTS (SELECT 1 FROM json_each(ccRecipients) WHERE json_extract(value, '$.name') LIKE :pattern ESCAPE '\\'
+                       OR json_extract(value, '$.address') LIKE :pattern ESCAPE '\\')
+            """
+        return try await database.read { db in
+            try StoredMessage
+                .filter(folderIDs.contains(Column("folderID")))
+                .filter(sql: matches, arguments: ["pattern": "%\(escaped)%"])
+                .order(Column("dateReceived").desc)
+                .fetchAll(db)
+                .map(\.mailMessage)
+        }
+    }
+
+    // Every account's folder list from the last time it was checked, by account ID.
+    static func folderLists() async throws -> [UUID: [MailFolder]] {
+        try await database.read { db in
+            var lists: [UUID: [MailFolder]] = [:]
+            for row in try StoredFolderList.fetchAll(db) {
+                if let accountID = UUID(uuidString: row.accountID) { lists[accountID] = row.folders }
+            }
+            return lists
         }
     }
 
@@ -137,6 +185,14 @@ enum MailCache {
                                arguments: [flags.isRead, flags.isFlagged, folderID, Int64(uid)])
             }
             try StoredFolderState(folderID: folderID, uidValidity: Int64(uidValidity)).upsert(db)
+        }
+    }
+
+    // Saves an account's folder list, replacing the last one.
+    static func saveFolderList(_ folders: [MailFolder], for accountID: UUID) async throws {
+        let row = StoredFolderList(accountID: accountID.uuidString, folders: folders)
+        try await database.write { db in
+            try row.upsert(db)
         }
     }
 
@@ -185,6 +241,9 @@ enum MailCache {
                 let keepClause = folderIDs.isEmpty ? "" : " AND folderID NOT IN (\(placeholders))"
                 try db.execute(sql: "DELETE FROM \(table) WHERE folderID LIKE ?\(keepClause)",
                                arguments: StatementArguments([prefix] + folderIDs))
+            }
+            if folderIDs.isEmpty {   // forgetting the whole account: its folder list too
+                _ = try StoredFolderList.deleteOne(db, key: accountID.uuidString)
             }
         }
     }
@@ -241,4 +300,12 @@ nonisolated struct StoredFolderState: Codable, FetchableRecord, PersistableRecor
 
     var folderID: String
     var uidValidity: Int64
+}
+
+// One row per account in the "folderList" table.
+nonisolated struct StoredFolderList: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "folderList"
+
+    var accountID: String
+    var folders: [MailFolder]
 }
