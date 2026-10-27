@@ -63,6 +63,9 @@ enum FolderRole: String, Codable, Hashable {
         else { self = .other }
     }
 
+    // Only your own folders can be renamed or deleted, not the ones the server relies on.
+    var canBeRenamedOrDeleted: Bool { self == .other || self == .archive }
+
     var iconName: String {
         switch self {
         case .inbox: "tray"
@@ -75,9 +78,6 @@ enum FolderRole: String, Codable, Hashable {
         case .other: "folder"
         }
     }
-
-    // All Mail's unread count includes every unread message in the account, so it isn't useful.
-    var showsUnreadCount: Bool { self != .allMail }
 
     // Classic Outlook order: Inbox, Drafts, Sent, Deleted, Junk, then everything else.
     var sortRank: Int {
@@ -114,6 +114,21 @@ struct MailFolder: Identifiable, Hashable, Codable {
 
     static func id(accountID: UUID, path: String) -> String {
         "\(accountID)/\(path)"
+    }
+
+    // The server name for a new folder called `name` inside this one,
+    // e.g. "Jobs" + "Arrow" → "Jobs/Arrow" (or "INBOX.Jobs.Arrow" on servers that use dots).
+    func childPath(named name: String) -> String {
+        path + (hierarchyDelimiter ?? "/") + name
+    }
+
+    // The server name this folder would have if renamed to `name`, staying in the
+    // same parent folder, e.g. "Jobs/Arrow" → "Jobs/Archer".
+    func renamedPath(to name: String) -> String {
+        guard let delimiter = hierarchyDelimiter, let lastDelimiter = path.range(of: delimiter, options: .backwards) else {
+            return name   // a top-level folder
+        }
+        return String(path[..<lastDelimiter.upperBound]) + name
     }
 
     // The sidebar's "All Inboxes" row isn't a real folder, so it gets its own ID.

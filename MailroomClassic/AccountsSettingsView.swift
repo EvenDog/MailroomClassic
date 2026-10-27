@@ -193,7 +193,8 @@ struct AccountsSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 540)
+        // A fixed height that fits on a laptop screen; the form scrolls if it's taller.
+        .frame(width: 540, height: 620)
         .fixedSize(horizontal: false, vertical: true)
         // The standard "choose a file" window, limited to configuration profiles.
         .fileImporter(isPresented: $isChoosingProfile, allowedContentTypes: [Self.profileType]) { result in

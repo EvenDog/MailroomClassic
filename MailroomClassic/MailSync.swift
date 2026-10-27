@@ -45,6 +45,12 @@ nonisolated struct FolderSyncPlan: Equatable, Sendable {
     }
 }
 
+// What a sync found out.
+struct FolderSyncResult {
+    var olderOnServer: Int           // messages older than the offline window (only on the server)
+    var arrivals: [MailMessage]      // newly arrived messages, for rules to act on
+}
+
 enum MailSync {
     // How many headers to download per request. Small batches let other work
     // (like opening a message) get a turn between them.
@@ -52,12 +58,19 @@ enum MailSync {
 
     // Brings one folder's saved copy up to date. `didChange` is called whenever
     // the saved copy changed, so the message list can refresh as messages arrive.
-    // Returns how many messages are older than the offline window (only on the server).
     @discardableResult
-    static func sync(_ folder: MailFolder, account: AccountSettings, didChange: () async -> Void) async throws -> Int {
+    static func sync(_ folder: MailFolder, account: AccountSettings, didChange: () async -> Void) async throws -> FolderSyncResult {
         let server = try await IMAPService.fetchSyncSnapshot(of: folder, since: OfflineWindow.startDate, account: account)
         let saved = try await MailCache.savedFolder(folder.id)
         let plan = FolderSyncPlan(saved: saved, server: server)
+        // A downloaded message is an "arrival" only if it's newer than everything
+        // saved before. So the first sync (when everything is new) has none, and
+        // a message you drag back into a folder (it keeps its old date) isn't one.
+        // nil means "no arrivals this time"; a synced-but-empty folder accepts any date.
+        let arrivalsAfter: Date? = saved == nil || plan.startOver
+            ? nil
+            : try await MailCache.newestDate(inFolder: folder.id) ?? .distantPast
+        var arrivals: [MailMessage] = []
 
         try await MailCache.apply(plan, to: folder.id, uidValidity: server.uidValidity)
         if plan.startOver || !plan.removedUIDs.isEmpty || !plan.changedFlags.isEmpty {
@@ -70,8 +83,11 @@ enum MailSync {
             let batch = Array(plan.newUIDs[start ..< min(start + headerBatchSize, plan.newUIDs.count)])
             let messages = try await IMAPService.fetchHeaders(uids: batch, in: folder, account: account)
             try await MailCache.save(messages)
+            if let arrivalsAfter {
+                arrivals += messages.filter { $0.dateReceived > arrivalsAfter }
+            }
             await didChange()
         }
-        return max(0, server.messageCount - server.flags.count)
+        return FolderSyncResult(olderOnServer: max(0, server.messageCount - server.flags.count), arrivals: arrivals)
     }
 }

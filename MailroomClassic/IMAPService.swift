@@ -1,9 +1,22 @@
 // Everything that reads or changes mail on the server over IMAP lives here,
 // using the SwiftMail library. Each function runs one job (list folders,
-// fetch messages, delete one…) on the account's always-open connection.
+// fetch messages, delete one…) on one of the account's always-open connections:
+// the main one for most work, a "reading" one just for opening messages (so that
+// never waits behind background work like syncing), and a "downloading" one for
+// fetching message contents ahead of time, for offline reading.
 
 import Foundation
 import SwiftMail
+
+// A message's contents as downloaded: the text and HTML to show (with the
+// pictures inside the email already filled in), and the list of its attachments
+// (not their contents, which download when you open one). MailCache saves it, so
+// opening the message again doesn't need the server.
+nonisolated struct MessageBody: Codable, Sendable {
+    var plainText: String
+    var html: String?
+    var attachmentParts: [MessagePart]
+}
 
 enum IMAPService {
     // How many messages to download at a time (more load with "Show older messages").
@@ -11,6 +24,12 @@ enum IMAPService {
 
     // One open connection per account, created the first time it's needed.
     private static var connections: [UUID: AccountConnection] = [:]
+    // The extra connections, each with its own job, so none waits behind another's work.
+    private enum SpareConnection {
+        case reading       // opening messages and their attachments
+        case downloading   // fetching message contents ahead of time (see MailStore.downloadForOffline)
+    }
+    private static var spareConnections: [SpareConnection: [UUID: AccountConnection]] = [:]
 
     // Logs in and immediately out on a separate, temporary connection, to check
     // an account's settings work before they're saved. Pass `credential` to test
@@ -145,32 +164,73 @@ enum IMAPService {
         }
     }
 
-    // Downloads a message's text, HTML and inline pictures, and marks it as read on the server.
-    // Attachments are listed but not downloaded; each one downloads when you open it.
-    static func fetchFullMessage(for account: AccountSettings, folderPath: String, uid: UInt32) async throws -> OpenMessage {
-        try await connection(for: account).run { server in
-            try await server.selectMailbox(folderPath)
-            guard let info = try await server.fetchMessageInfo(for: UID(uid)) else {
-                return OpenMessage(plainText: "(This message could not be found on the server.)", html: nil, attachments: [])
-            }
-            // An email is made of numbered "parts" (text, HTML, each picture, each attachment).
-            // First get the list of parts, then download only the ones needed to show the message.
+    // Downloads what's needed to show a message: its text, its HTML version and the
+    // pictures inside it (attachments wait until you open them). Each request costs
+    // Gmail about a second, so this uses as few as it can: open the folder (skipped
+    // if it's already open), get the list of parts, then all the needed parts in one
+    // go. It doesn't mark the message as read; see `markAsRead`.
+    // Returns nil if the message isn't on the server any more.
+    static func fetchBody(for account: AccountSettings, folderPath: String, uid: UInt32) async throws -> MessageBody? {
+        try await onSpareConnection(.reading, of: account, folderPath: folderPath) { server in
             var parts = try await server.fetchStructure(UID(uid))
-            let structure = Message(header: info, parts: parts)
+            guard !parts.isEmpty else { return nil }
+            // SwiftMail's Message needs a header, but only the parts are used to show the
+            // message (the sender, subject… are already saved on this Mac), so a stand-in will do.
+            let header = MessageInfo(sequenceNumber: SequenceNumber(1), uid: UID(uid))
+            let structure = Message(header: header, parts: parts)
             let neededSections = Set((structure.bodies + structure.cids).map(\.section))
-            for index in parts.indices where neededSections.contains(parts[index].section) {
-                parts[index].data = try await server.fetchPart(section: parts[index].section, of: UID(uid))
+            let requests = parts.filter { neededSections.contains($0.section) }.map { (uid: UID(uid), section: $0.section) }
+            if !requests.isEmpty {
+                // "Pipelined": all the requests are sent at once instead of waiting for each answer.
+                let downloaded = try await server.fetchPartsPipelined(parts: requests)[UID(uid)] ?? []
+                for (section, data) in downloaded {
+                    if let index = parts.firstIndex(where: { $0.section == section }) { parts[index].data = data }
+                }
             }
+            return makeBody(from: Message(header: header, parts: parts))
+        }
+    }
+
+    // Downloads the contents of several messages in one folder at once, for offline
+    // reading: one request for all their lists of parts, then one burst for every
+    // needed part (text, HTML, pictures inside the email). Pass at most 50 or so.
+    // Messages no longer on the server are left out of the result.
+    static func fetchBodies(uids: [UInt32], in folderPath: String, account: AccountSettings) async throws -> [UInt32: MessageBody] {
+        guard !uids.isEmpty else { return [:] }
+        return try await onSpareConnection(.downloading, of: account, folderPath: folderPath) { server in
+            let infos = try await server.fetchMessageInfosBulk(using: uidSet(uids), options: [.bodyStructure])
+            var requests: [(uid: UID, section: Section)] = []
+            for info in infos {
+                guard let uid = info.uid else { continue }
+                let structure = Message(header: info, parts: info.parts)
+                requests += (structure.bodies + structure.cids).map { (uid: uid, section: $0.section) }
+            }
+            let downloaded = requests.isEmpty ? [:] : try await server.fetchPartsPipelined(parts: requests)
+
+            var bodies: [UInt32: MessageBody] = [:]
+            for info in infos {
+                guard let uid = info.uid else { continue }
+                var parts = info.parts
+                for (section, data) in downloaded[uid] ?? [] {
+                    if let index = parts.firstIndex(where: { $0.section == section }) { parts[index].data = data }
+                }
+                bodies[uid.value] = makeBody(from: Message(header: info, parts: parts))
+            }
+            return bodies
+        }
+    }
+
+    // Marks one message as read on the server (after it's been shown).
+    static func markAsRead(uid: UInt32, in folderPath: String, account: AccountSettings) async throws {
+        try await onSpareConnection(.reading, of: account, folderPath: folderPath) { server in
             try await server.store(flags: [.seen], on: UIDSet(UID(uid)), operation: .add)
-            return makeOpenMessage(from: Message(header: info, parts: parts), uid: uid, folderPath: folderPath, account: account)
         }
     }
 
     // Downloads one attachment (one part of a message) and undoes its email encoding.
     static func fetchAttachment(_ part: MessagePart, uid: UInt32, folderPath: String, account: AccountSettings) async throws -> Data {
-        try await connection(for: account).run { server in
-            try await server.selectMailbox(folderPath)
-            return try await server.fetchPart(section: part.section, of: UID(uid)).decoded(for: part)
+        try await onSpareConnection(.reading, of: account, folderPath: folderPath) { server in
+            try await server.fetchPart(section: part.section, of: UID(uid)).decoded(for: part)
         }
     }
 
@@ -217,12 +277,57 @@ enum IMAPService {
         }
     }
 
+    // MARK: - Managing folders
+    // No retries for these: if the first try worked but its reply was slow, a retry
+    // would fail ("already exists" / "doesn't exist") and wrongly report an error.
+
+    // Creates a folder. `path` is its full server name (see MailFolder.childPath);
+    // SwiftMail adds the server's prefix (like MXroute's "INBOX.") if it's missing.
+    static func createFolder(path: String, account: AccountSettings) async throws {
+        try await connection(for: account).run(retryOnTimeout: false) { server in
+            try await server.createMailbox(path)
+        }
+    }
+
+    static func renameFolder(from oldPath: String, to newPath: String, account: AccountSettings) async throws {
+        try await connection(for: account).run(retryOnTimeout: false) { server in
+            try await server.renameMailbox(oldPath, to: newPath)
+        }
+    }
+
+    // Deletes a folder and the messages in it. (Gmail removes the label; the messages stay in All Mail.)
+    static func deleteFolder(path: String, account: AccountSettings) async throws {
+        try await connection(for: account).run(retryOnTimeout: false) { server in
+            try await server.deleteMailbox(path)
+        }
+    }
+
+    // The UIDs of every message in a folder, or just the unread ones
+    // (for Empty Trash and Mark All as Read).
+    static func fetchAllUIDs(in folderPath: String, onlyUnread: Bool, account: AccountSettings) async throws -> [UInt32] {
+        try await connection(for: account).run { server in
+            let selection = try await server.selectMailbox(folderPath)
+            guard selection.messageCount > 0 else { return [] }
+            let result: ExtendedSearchResult<UID> = try await server.extendedSearch(criteria: [onlyUnread ? .unseen : .all])
+            return (result.all?.toArray() ?? []).map(\.value)
+        }
+    }
+
     // Closes an account's connection, e.g. when the account is removed.
     static func closeConnection(for accountID: UUID) async {
         await connections.removeValue(forKey: accountID)?.close()
+        for kind in [SpareConnection.reading, .downloading] {
+            await spareConnections[kind]?.removeValue(forKey: accountID)?.close()
+        }
     }
 
     // MARK: - Connecting
+
+    // Closes an account's "downloading" connection when a download run is over,
+    // so it doesn't sit open (and get checked) until the next one.
+    static func closeDownloadingConnection(for accountID: UUID) async {
+        await spareConnections[.downloading]?.removeValue(forKey: accountID)?.close()
+    }
 
     // Opens a new connection to the account's server and logs in, using
     // `credential` if given, or the one saved for the account otherwise.
@@ -261,6 +366,35 @@ enum IMAPService {
         return connection
     }
 
+    // Runs `job` on one of the account's extra connections with `folderPath` open.
+    // Opening the folder is skipped if it's already open there. If the job then
+    // fails, the server may have quietly reconnected (which closes the folder),
+    // so this opens the folder for real and tries once more.
+    private static func onSpareConnection<Result: Sendable>(
+        _ kind: SpareConnection,
+        of account: AccountSettings,
+        folderPath: String,
+        _ job: @escaping (IMAPServer) async throws -> Result
+    ) async throws -> Result {
+        let reader: AccountConnection
+        if let existing = spareConnections[kind]?[account.id] {
+            reader = existing
+        } else {
+            reader = AccountConnection(account: account)
+            spareConnections[kind, default: [:]][account.id] = reader
+        }
+        return try await reader.run { server in
+            let openedFolder = try await reader.select(folderPath, on: server)
+            do {
+                return try await job(server)
+            } catch let error where !openedFolder && !(error is CancellationError) {
+                reader.forgetSelectedFolder()
+                try await reader.select(folderPath, on: server)
+                return try await job(server)
+            }
+        }
+    }
+
     // MARK: - Converting SwiftMail's types into ours
 
     // Returns nil if the server didn't give the message a UID.
@@ -292,19 +426,9 @@ enum IMAPService {
 
     // `uid`, `folderPath` and `account` say where the message lives, so each
     // attachment knows where to download itself from later.
-    private static func makeOpenMessage(from message: Message, uid: UInt32, folderPath: String, account: AccountSettings) -> OpenMessage {
-        let attachments = message.attachments.map { part in
-            // The server reports the size as sent, and attachments are usually sent
-            // as base64 text, which is about 4/3 the size of the real file.
-            let isBase64 = part.encoding?.lowercased() == "base64"
-            return MailAttachment(
-                filename: part.suggestedFilename,
-                mimeType: part.contentType,
-                approximateSize: part.size.map { isBase64 ? $0 * 3 / 4 : $0 },
-                download: { try await fetchAttachment(part, uid: uid, folderPath: folderPath, account: account) }
-            )
-        }
-
+    // Turns downloaded parts into a MessageBody: fills the pictures into the HTML,
+    // and makes a plain-text version if the email only came as HTML.
+    private static func makeBody(from message: Message) -> MessageBody {
         var html = message.htmlBody
         // Pictures inside an email (logos, signatures) are referred to as "cid:something".
         // Swap each reference for the picture itself, written out as a data: URL.
@@ -325,7 +449,31 @@ enum IMAPService {
         } else {
             plainText = "(This message has no text.)"
         }
-        return OpenMessage(plainText: plainText, html: html, attachments: attachments)
+        // Keep only each attachment's description, not any downloaded contents (a picture
+        // can count as an attachment too), so the saved copy stays small.
+        let attachmentParts = message.attachments.map { part in
+            var description = part
+            description.data = nil
+            return description
+        }
+        return MessageBody(plainText: plainText, html: html, attachmentParts: attachmentParts)
+    }
+
+    // What the reading pane shows for a MessageBody (just downloaded, or saved on this
+    // Mac). Each attachment gets a `download` that fetches it from the server when opened.
+    static func openMessage(from body: MessageBody, uid: UInt32, folderPath: String, account: AccountSettings) -> OpenMessage {
+        let attachments = body.attachmentParts.map { part in
+            // The server reports the size as sent, and attachments are usually sent
+            // as base64 text, which is about 4/3 the size of the real file.
+            let isBase64 = part.encoding?.lowercased() == "base64"
+            return MailAttachment(
+                filename: part.suggestedFilename,
+                mimeType: part.contentType,
+                approximateSize: part.size.map { isBase64 ? $0 * 3 / 4 : $0 },
+                download: { try await fetchAttachment(part, uid: uid, folderPath: folderPath, account: account) }
+            )
+        }
+        return OpenMessage(plainText: body.plainText, html: body.html, attachments: attachments)
     }
 
     // Uses the server's "special-use" labels (\Sent, \Trash…) when present,

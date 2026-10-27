@@ -1,13 +1,17 @@
 // The starting point of Mailroom Classic. When the app launches, macOS runs
 // this code first: it creates the shared MailStore and sets up the app's
-// windows: the main mail window, compose windows, and Settings.
+// windows: the main mail window, compose windows, and Settings. It also asks
+// before quitting if any email hasn't been sent.
 
+import AppKit
 import SwiftUI
 
 // `@main` marks this as the app's entry point: the one place execution begins.
 @main
 struct MailroomClassicApp: App {
     @State private var store = MailStore()
+    // Connects AppDelegate (below), for the "unsent emails" question when quitting.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         // `Window` (rather than `WindowGroup`) means there's only ever one main window.
@@ -40,9 +44,15 @@ struct MailroomClassicApp: App {
         }
         .defaultSize(width: 700, height: 560)
 
+        // Settings (⌘,) has two tabs, like most Mac apps' settings windows.
         Settings {
-            AccountsSettingsView()
-                .environment(store)
+            TabView {
+                AccountsSettingsView()
+                    .tabItem { Label("Accounts", systemImage: "person.crop.circle") }
+                RulesSettingsView()
+                    .tabItem { Label("Rules", systemImage: "line.3.horizontal.decrease.circle") }
+            }
+            .environment(store)
         }
     }
 }
@@ -97,6 +107,42 @@ private struct ReadingPaneMenu: View {
         Picker("Reading Pane", selection: $readingPaneAtBottom) {
             Text("Right").tag(false)
             Text("Bottom").tag(true)
+        }
+    }
+}
+
+// The app's "delegate": the object macOS asks about app-wide events.
+// Here it's asked whether the app may quit (⌘Q).
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    // If any compose window has unsent changes, asks first. Compose windows
+    // with changes are marked "edited" by WindowCloseGuard (the dot in their
+    // close button), so those are the ones to look for.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let unsent = sender.windows.filter { $0.isVisible && $0.isDocumentEdited }
+        guard !unsent.isEmpty else { return .terminateNow }
+
+        let alert = NSAlert()
+        alert.messageText = unsent.count == 1
+            ? "You have an email you haven't sent."
+            : "You have \(unsent.count) emails you haven't sent."
+        alert.informativeText = "Do you want to review before quitting? If you quit anyway, unsaved changes are lost."
+        alert.addButton(withTitle: "Review…")   // the first button is the default (Return)
+        alert.addButton(withTitle: "Cancel")
+        let quitButton = alert.addButton(withTitle: "Quit Anyway")
+        quitButton.hasDestructiveAction = true  // shown in red
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            // Each window asks its own "Do you want to save changes?" question.
+            for window in unsent {
+                window.makeKeyAndOrderFront(nil)
+                window.performClose(nil)
+            }
+            return .terminateCancel
+        case .alertThirdButtonReturn:
+            return .terminateNow
+        default:
+            return .terminateCancel
         }
     }
 }

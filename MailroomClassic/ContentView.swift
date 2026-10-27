@@ -117,6 +117,11 @@ struct ContentView: View {
                 Text(store.statusText)
                     .lineLimit(1)
                 Spacer()
+                // Shown while messages download for offline reading (see MailStore.downloadForOffline).
+                if let progress = store.offlineDownloadProgress {
+                    Text(progress)
+                        .lineLimit(1)
+                }
             }
             .font(.callout)
             .foregroundStyle(.secondary)

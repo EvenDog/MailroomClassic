@@ -12,6 +12,8 @@ It works with:
 
 - Three-pane layout with unread mail in **bold**, unread counts on folders, and paperclip and red-flag columns
 - Click the From, Subject or Received column header to sort by it. When sorted by From or Subject, type a letter to jump to it
+- Drag column headers to reorder them, drag their edges to resize, and right-click the header row to hide or show columns; the layout is remembered
+- Sorted by date, messages are grouped under classic Outlook headings: Today, Yesterday, the days earlier this week, Last Week, Two Weeks Ago, Three Weeks Ago, Earlier This Month, Last Month, Older. Click the arrow next to a heading to collapse or expand its group
 - **All Inboxes**: every account's Inbox in one list, newest first, with the total unread count. Search, delete, flag, Junk and Move To all work there too (Move To only offers folders in the message's own account).
 - Reading pane on the right or at the bottom (**View → Reading Pane**)
 - Print (⌘P) with an Outlook-style header; the print dialog can also save as PDF
@@ -26,9 +28,11 @@ It works with:
 - A signature for each account (Settings → Edit), added to new emails, replies and forwards
 - The To and Cc fields suggest people you've emailed before, or whose mail you've opened
 - Search: matches in sender, recipients and subject appear instantly from the saved copy, then the server's results (which also search the message text, and older mail) are added
-- Folders inside folders (like Gmail's nested labels) show as a tree you can expand, and each account can be collapsed (hover over its name)
-- Trusts the server's own labels for Drafts, Sent, Trash and Junk, so a folder you named "Drafts" isn't mistaken for the real one; Gmail's All Mail shows no unread count
-- **Keeps the last 12 months of mail headers on your Mac** (like Outlook's offline file), so folders open instantly. Your folder list and unread counts are saved too, so the app opens straight to your mail, even with no internet. It syncs with the server in the background: your Inboxes after every check, and every other folder at least every 30 minutes. Message bodies and attachments still download when you open them.
+- Folders inside folders (like Gmail's nested labels) show as a tree you can expand, and each account can be collapsed (hover over its name). Everything except Inbox, Drafts, Sent, Trash and Junk sits in a collapsible **More Folders** group under each account
+- Right-click a folder for **New Folder**, **Rename Folder**, **Delete Folder** and **Mark All as Read**, plus **Empty Trash** / **Empty Junk** on those folders. Right-click an account's name to make a top-level folder. (Inbox, Drafts, Sent, Trash, Junk and All Mail can't be renamed or deleted.)
+- **Rules** (Settings → Rules): "if From / Subject / To or Cc contains ___, move it to [folder]", with Edit and Remove for each rule. They run on new mail in the Inbox after each check; **Run Rules Now** also applies them to what's already there.
+- Trusts the server's own labels for Drafts, Sent, Trash and Junk, so a folder you named "Drafts" isn't mistaken for the real one
+- **Keeps the last 12 months of mail headers on your Mac** (like Outlook's offline file), so folders open instantly. Your folder list and unread counts are saved too, so the app opens straight to your mail, even with no internet. It syncs with the server in the background: your Inboxes after every check, and every other folder at least every 30 minutes. Message text is downloaded ahead of time too, in the background (newest first, with progress in the status bar), so messages open instantly and can be read offline. All Mail, Spam and Trash are skipped; their messages are saved once you open them. Attachments download when you open them.
 - **Show Older Messages** fetches mail older than 12 months from the server, 50 at a time
 - Mark as read/unread (⇧⌘U), flag (⇧⌘L), and Delete. Delete moves mail to Trash; deleting from Trash removes it for good, after asking.
 - Select several messages at once (⌘-click, ⇧-click) to delete, move, flag or mark them together
@@ -36,9 +40,11 @@ It works with:
 - **Junk** button (⇧⌘J) moves mail to the Junk folder; in the Junk folder it becomes **Not Junk** and moves mail back to the Inbox
 - Checks for new mail automatically (every 1–30 minutes, or manually), with a notification for new mail and the unread count on the Dock icon
 - Edit an account's settings at any time; changes are tested before they're saved
+- Closing a compose window, or quitting (⌘Q), with an unsent email asks before anything is lost
 - Plain-English error messages (e.g. "Couldn't connect to … Check the server name")
+- If logging in keeps failing, the app waits longer between tries (1, then 5, then 15 minutes) instead of retrying every few seconds, so a busy server (like Gmail slowing down an account) gets a rest and a wrong password doesn't get your IP address blocked
 - Send/Receive button and a status bar
-- Keeps one connection open per account, so clicking around is quick
+- Keeps connections open to each account, so clicking around is quick: one for opening messages, and one for everything else (checking, syncing, moving), so a message never waits behind background work
 - Passwords and sign-in tokens are stored only in the **macOS Keychain**
 - Saved attachments are marked as downloaded from the internet, so macOS checks them before they can run
 - No analytics and no servers of its own: the app only talks to your mail providers
@@ -99,7 +105,6 @@ Microsoft only allows OAuth ("Sign in with Microsoft") for IMAP and SMTP. That m
 
 - Search looks in one folder at a time (or every Inbox, from All Inboxes)
 - Messages can't be moved between accounts
-- Quitting the app (⌘Q) with an unsent email open doesn't ask to save it; only closing its window does
 - A signature is added when the compose window opens, so switching the From account doesn't swap it
 
 ## App icon

@@ -1,12 +1,14 @@
 // The local copy of your mail: a database file on this Mac holding each account's
-// folder list and the headers (sender, subject, date, read/flagged…) of the last
-// 12 months of messages in every folder, like classic Outlook's offline file. The message list reads
+// folder list, the headers (sender, subject, date, read/flagged…) of the last
+// 12 months of messages in every folder, and the contents of messages you've
+// opened, like classic Outlook's offline file. The message list reads
 // from here, so folders open instantly; MailSync keeps it matching the server.
 // It uses GRDB, a Swift library on top of SQLite (the database engine built
 // into macOS). A "table" is like a spreadsheet: one row per saved item.
 
 import Foundation
 import GRDB
+import SwiftMail   // for MessagePart, inside a saved MessageBody
 
 // How far back the local copy reaches. Older mail stays on the server and can
 // still be found with search or "Show Older Messages".
@@ -96,6 +98,22 @@ enum MailCache {
                 table.column("folders", .text).notNull()
             }
         }
+        migrator.registerMigration("v3") { db in
+            // The contents of messages you've opened, so opening them again is instant.
+            try db.create(table: StoredBody.databaseTableName) { table in
+                table.column("folderID", .text).notNull()
+                table.column("uid", .integer).notNull()
+                table.column("plainText", .text).notNull()
+                table.column("html", .text)
+                table.column("attachmentParts", .text).notNull()   // JSON, like the addresses
+                table.primaryKey(["folderID", "uid"])
+                // A "foreign key": each body belongs to a row in the message table. With
+                // `.cascade`, deleting that message (moved, deleted, or now older than 12
+                // months) makes SQLite delete its body too, so nothing is left behind.
+                table.foreignKey(["folderID", "uid"], references: StoredMessage.databaseTableName,
+                                 columns: ["folderID", "uid"], onDelete: .cascade)
+            }
+        }
         return migrator
     }
 
@@ -152,6 +170,37 @@ enum MailCache {
         }
     }
 
+    // When the newest saved message in a folder arrived, or nil if none are saved.
+    static func newestDate(inFolder folderID: MailFolder.ID) async throws -> Date? {
+        try await database.read { db in
+            try Date.fetchOne(db, sql: "SELECT MAX(dateReceived) FROM message WHERE folderID = ?", arguments: [folderID])
+        }
+    }
+
+    // The saved contents of a message you've opened before, or nil.
+    static func body(of message: MailMessage) async throws -> MessageBody? {
+        let folderID = message.folderID, uid = Int64(message.uid)
+        return try await database.read { db in
+            try StoredBody.fetchOne(db, key: ["folderID": folderID, "uid": uid])?.body
+        }
+    }
+
+    // The messages in a folder whose contents aren't saved yet, newest first
+    // (for downloading ahead of time).
+    static func messagesWithoutBody(inFolder folderID: MailFolder.ID) async throws -> [MailMessage] {
+        try await database.read { db in
+            // A "LEFT JOIN" pairs each message with its body row if there is one;
+            // `messageBody.uid IS NULL` keeps the ones that have none.
+            try StoredMessage.fetchAll(db, sql: """
+                SELECT message.* FROM message
+                LEFT JOIN messageBody ON messageBody.folderID = message.folderID AND messageBody.uid = message.uid
+                WHERE message.folderID = ? AND messageBody.uid IS NULL
+                ORDER BY message.dateReceived DESC
+                """, arguments: [folderID])
+                .map(\.mailMessage)
+        }
+    }
+
     // What's saved for a folder, or nil if it's never been synced.
     static func savedFolder(_ folderID: MailFolder.ID) async throws -> SavedFolder? {
         try await database.read { db in
@@ -196,6 +245,26 @@ enum MailCache {
         }
     }
 
+    // Saves an opened message's contents. Fails if the message itself isn't saved
+    // (e.g. one fetched with Show Older Messages), which is fine: those aren't kept.
+    static func saveBody(_ body: MessageBody, for message: MailMessage) async throws {
+        let row = StoredBody(folderID: message.folderID, uid: Int64(message.uid), body: body)
+        try await database.write { db in
+            try row.upsert(db)
+        }
+    }
+
+    // Saves several messages' contents at once. Any whose message was removed in the
+    // meantime (moved, deleted) are skipped instead of failing the rest.
+    static func saveBodies(_ bodies: [(message: MailMessage, body: MessageBody)]) async throws {
+        let rows = bodies.map { StoredBody(folderID: $0.message.folderID, uid: Int64($0.message.uid), body: $0.body) }
+        try await database.write { db in
+            for row in rows {
+                try? row.upsert(db)   // fails only if its message is gone
+            }
+        }
+    }
+
     // Saves messages, replacing any already saved with the same folder and UID.
     static func save(_ messages: [MailMessage]) async throws {
         let rows = messages.map(StoredMessage.init)
@@ -216,6 +285,20 @@ enum MailCache {
                 try db.execute(sql: "UPDATE message SET isRead = ?, isFlagged = ? WHERE folderID = ? AND uid = ?",
                                arguments: [flags.isRead, flags.isFlagged, key.folderID, key.uid])
             }
+        }
+    }
+
+    // Records that every message in a folder is read (after Mark All as Read).
+    static func markAllRead(inFolder folderID: MailFolder.ID) async throws {
+        try await database.write { db in
+            try db.execute(sql: "UPDATE message SET isRead = 1 WHERE folderID = ?", arguments: [folderID])
+        }
+    }
+
+    // Forgets every message in a folder (after Empty Trash / Empty Junk).
+    static func removeMessages(inFolder folderID: MailFolder.ID) async throws {
+        try await database.write { db in
+            try db.execute(sql: "DELETE FROM message WHERE folderID = ?", arguments: [folderID])
         }
     }
 
@@ -308,4 +391,27 @@ nonisolated struct StoredFolderList: Codable, FetchableRecord, PersistableRecord
 
     var accountID: String
     var folders: [MailFolder]
+}
+
+// One opened message's contents: a row in the "messageBody" table.
+nonisolated struct StoredBody: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "messageBody"
+
+    var folderID: String
+    var uid: Int64
+    var plainText: String
+    var html: String?
+    var attachmentParts: [MessagePart]
+
+    init(folderID: String, uid: Int64, body: MessageBody) {
+        self.folderID = folderID
+        self.uid = uid
+        plainText = body.plainText
+        html = body.html
+        attachmentParts = body.attachmentParts
+    }
+
+    var body: MessageBody {
+        MessageBody(plainText: plainText, html: html, attachmentParts: attachmentParts)
+    }
 }
