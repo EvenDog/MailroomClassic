@@ -602,9 +602,10 @@ final class MailStore {
 
     // Shows a whole message (text, HTML, list of attachments), then marks it as read,
     // straight away or after the wait chosen in Settings (see markAsReadDelaySeconds).
+    // With `markAsRead: false` it stays unread (a message selected automatically after a delete).
     // A message opened before comes from the copy saved on this Mac; otherwise it's
     // downloaded and saved for next time.
-    func open(_ message: MailMessage, in folder: MailFolder) async {
+    func open(_ message: MailMessage, in folder: MailFolder, markAsRead: Bool = true) async {
         openMessage = nil
         unsubscribeOffer = nil
         downloadedAttachments = [:]
@@ -622,7 +623,7 @@ final class MailStore {
         }
         guard isShown else { return }
         lookUpUnsubscribe(for: message, in: folder, account: account)
-        guard !message.isRead else { return }
+        guard markAsRead, !message.isRead else { return }
 
         // Wait first, if Settings says to. Clicking another message cancels this
         // task (see ContentView), which ends the wait early, so the message stays unread.

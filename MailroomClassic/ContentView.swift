@@ -37,8 +37,11 @@ struct ContentView: View {
     // The message list's rows, top to bottom (it reports them), to know which message is next.
     @State private var displayedOrder: [MailMessage.ID] = []
     // Settings → Reading: after a delete or move, select the next message (off at first).
-    @AppStorage(Self.selectNextAfterDeleteKey) private var selectNextAfterDelete = false
+    @AppStorage(Self.selectNextAfterDeleteKey) private var selectNextAfterDelete = true
     static let selectNextAfterDeleteKey = "selectNextAfterDelete"
+    // The message Mailroom selected by itself after a delete or move (see deselect).
+    // It stays unread until you click in the reading pane (see markAutoSelectedMessageRead).
+    @State private var autoSelectedMessageID: MailMessage.ID?
 
     // `@AppStorage` reads a saved setting (the Settings window writes it). 0 = check manually only.
     @AppStorage("checkIntervalMinutes") private var checkIntervalMinutes = 5
@@ -203,7 +206,10 @@ struct ContentView: View {
                 store.closeMessage()
                 return
             }
-            await store.open(message, in: folder)
+            // A message Mailroom picked by itself stays unread for now; one you picked counts as read.
+            let wasAutoSelected = message.id == autoSelectedMessageID
+            if !wasAutoSelected { autoSelectedMessageID = nil }
+            await store.open(message, in: folder, markAsRead: !wasAutoSelected)
         }
         // When an account is added in Settings, select its Inbox if nothing is selected yet
         // (or, if you're looking at All Inboxes, add the new Inbox to it).
@@ -488,31 +494,73 @@ struct ContentView: View {
         }
     }
 
+    // One of the All / Unread / Flagged tabs: plain text, with the chosen one
+    // blue and bold, and a blue line under it.
+    private func filterTab(_ filter: MessageFilter) -> some View {
+        let isChosen = messageFilter == filter
+        return Button {
+            messageFilter = filter
+        } label: {
+            // An invisible bold copy sets the width, so the tab doesn't grow
+            // and nudge its neighbors when it turns bold.
+            Text(filter.rawValue).bold().hidden()
+                .overlay {
+                    Text(filter.rawValue)
+                        .fontWeight(isChosen ? .semibold : .regular)
+                        .foregroundStyle(isChosen ? Color.accentColor : .secondary)
+                }
+                .padding(.vertical, 8)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(isChosen ? Color.accentColor : .clear)
+                        .frame(height: 2)
+                }
+                .contentShape(Rectangle())   // the whole tab is clickable, not just the letters
+        }
+        .buttonStyle(.plain)   // no button box, just what's drawn above
+        .accessibilityAddTraits(isChosen ? .isSelected : [])
+    }
+
+    // The Comfortable or Compact icon button; the chosen one has a soft blue background.
+    private func densityButton(_ density: MessageListDensity) -> some View {
+        let isChosen = messageListDensity == density
+        return Button {
+            messageListDensity = density
+        } label: {
+            Image(systemName: density.symbolName)
+                .foregroundStyle(isChosen ? Color.accentColor : .secondary)
+                .frame(width: 26, height: 22)
+                .background(isChosen ? Color.accentColor.opacity(0.16) : .clear,
+                            in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(density.helpText)
+        .accessibilityLabel(density.rawValue)
+        .accessibilityAddTraits(isChosen ? .isSelected : [])
+    }
+
     private var mailListColumn: some View {
         VStack(spacing: 0) {
-            HStack {
-                Picker("Show", selection: $messageFilter) {
-                    ForEach(MessageFilter.allCases, id: \.self) { filter in
-                        Text(filter.rawValue)
-                    }
+            // `alignment: .bottom` lines the tabs' underlines up with the bar's bottom edge.
+            HStack(alignment: .bottom, spacing: 20) {
+                ForEach(MessageFilter.allCases, id: \.self) { filter in
+                    filterTab(filter)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()   // only as wide as its three buttons
                 Spacer()
                 // Also in View → Message List.
-                Picker("Message List", selection: $messageListDensity) {
+                HStack(spacing: 2) {
                     ForEach(MessageListDensity.allCases, id: \.self) { density in
-                        Text(density.rawValue)
+                        densityButton(density)
                     }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .help("Comfortable: two lines per message, with a preview. Compact: one line per message, in columns.")
+                .padding(.bottom, 6)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 14)
+            .padding(.top, 4)
+            // A thin line under the bar. `background` (not `overlay`) puts it behind
+            // the chosen tab's underline, so the blue line sits on top of it.
+            .background(alignment: .bottom) { Divider() }
             MessageListView(messages: shownMessages, selection: $selection, displayedOrder: $displayedOrder,
                             folderName: folderColumnText,
                             previewText: showPreviewText ? { store.previews[$0.id] } : nil,
@@ -559,8 +607,17 @@ struct ContentView: View {
             // Only drafts get an "Edit Draft" button.
             let editAction: (() -> Void)? = selectedMessageFolder?.role == .drafts ? { editDraft() } : nil
             ReadingPaneView(message: selectedMessage, openMessage: store.openMessage, editDraft: editAction,
-                            allowRemoteContent: $allowRemoteContent)
+                            allowRemoteContent: $allowRemoteContent, onClickInside: markAutoSelectedMessageRead)
         }
+    }
+
+    // A click in the reading pane: if it's showing a message Mailroom selected by
+    // itself after a delete or move, that message now counts as read.
+    private func markAutoSelectedMessageRead() {
+        guard let message = selectedMessage, message.id == autoSelectedMessageID,
+              let folder = selectedMessageFolder else { return }
+        autoSelectedMessageID = nil
+        Task { await store.setRead(true, for: [message], in: folder) }
     }
 
     // Under the window title, e.g. "8 messages, 4 unread" (or "12 found" while searching).
@@ -749,6 +806,7 @@ struct ContentView: View {
         selection.subtract(messages.map(\.id))
         if selectNextAfterDelete, selection.isEmpty, let next {
             selection = [next]
+            autoSelectedMessageID = next
         }
     }
 

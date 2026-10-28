@@ -52,6 +52,22 @@ enum MessageListDensity: String, CaseIterable {
     case compact = "Compact"
 
     static let storageKey = "messageListDensity"
+
+    // The icon for its button above the message list (an SF Symbol, Apple's built-in icons).
+    var symbolName: String {
+        switch self {
+        case .comfortable: "rectangle.grid.1x2"   // two stacked boxes: two-line rows
+        case .compact: "line.3.horizontal"        // thin lines: one-line rows
+        }
+    }
+
+    // The button's tooltip.
+    var helpText: String {
+        switch self {
+        case .comfortable: "Comfortable: two lines per message, with a preview"
+        case .compact: "Compact: one line per message, in columns"
+        }
+    }
 }
 
 // One account's folders in the Move To menu. The messages' own account's folders
@@ -411,9 +427,11 @@ struct MessageListView: View {
             }
 
             TableColumn("Received", value: \.dateReceived) { message in
-                Text(message.dateReceived, format: .dateTime.month().day().hour().minute())
+                Text(DateHeading.compactText(for: message.dateReceived))
+                    // Hovering shows the full date and time, e.g. "Saturday, October 24, 2026 at 4:53 PM".
+                    .help(message.dateReceived.formatted(date: .complete, time: .shortened))
             }
-            .width(min: 115, ideal: 130)   // fits "Oct 22, 12:45 PM"
+            .width(min: 85, ideal: 95)   // fits "Wed 12:45 PM"
             .customizationID("received")
 
             TableColumn(Text(Image(systemName: "flag"))) { message in
@@ -657,5 +675,18 @@ enum DateHeading {
             return date.formatted(Date.FormatStyle(calendar: calendar).weekday(.wide))   // e.g. "Monday"
         }
         return date.formatted(date: .numeric, time: .omitted)   // e.g. "10/14/2026"
+    }
+
+    // The date in the Compact list's Received column, kept short like classic
+    // Outlook's: the time for today, the short weekday and time within the last
+    // week, otherwise the date with a two-digit year.
+    static func compactText(for date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let today = calendar.startOfDay(for: now)
+        if date >= today { return date.formatted(date: .omitted, time: .shortened) }   // e.g. "9:41 AM"
+        let format = Date.FormatStyle(calendar: calendar)
+        if let weekAgo = calendar.date(byAdding: .day, value: -6, to: today), date >= weekAgo {
+            return date.formatted(format.weekday(.abbreviated).hour().minute())   // e.g. "Sat 4:53 PM"
+        }
+        return date.formatted(format.month(.defaultDigits).day().year(.twoDigits))   // e.g. "10/14/26"
     }
 }

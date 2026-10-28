@@ -11,6 +11,7 @@ enum MailProvider: String, Codable, CaseIterable, Identifiable {
     case other       // any standard IMAP/SMTP host, e.g. MXroute
     case gmail
     case office365
+    case proton      // Proton Mail, through the Proton Mail Bridge app running on this Mac
 
     var id: Self { self }
 
@@ -19,10 +20,11 @@ enum MailProvider: String, Codable, CaseIterable, Identifiable {
         case .other: "Other (IMAP/SMTP, e.g. MXroute)"
         case .gmail: "Gmail"
         case .office365: "Office 365 / Exchange Online"
+        case .proton: "Proton Mail (Bridge)"
         }
     }
 
-    // Gmail and Office 365 put a copy of everything you send into your Sent
+    // Gmail, Office 365 and Proton put a copy of everything you send into your Sent
     // folder automatically. Other servers don't, so the app saves it there itself.
     var savesSentMailAutomatically: Bool { self != .other }
 }

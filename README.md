@@ -7,6 +7,7 @@ It works with:
 - **Any standard IMAP/SMTP account**, such as [MXroute](https://mxroute.com)
 - **Gmail** (with an app password)
 - **Office 365 / Exchange Online** (with "Sign in with Microsoft")
+- **Proton Mail** (through the Proton Mail Bridge app, which needs a paid Proton plan)
 
 ## Download
 
@@ -51,13 +52,13 @@ Get the latest **MailroomClassic-x.y.dmg** from the [Releases page](https://gith
 - **Keeps the last 12 months of mail headers on your Mac** (like Outlook's offline file), so folders open instantly. Your folder list and unread counts are saved too, so the app opens straight to your mail, even with no internet. It syncs with the server in the background: your Inboxes after every check, and every other folder at least every 30 minutes. Message text is downloaded ahead of time too, in the background (newest first, with progress in the status bar), so messages open instantly and can be read offline. All Mail, Spam and Trash are skipped; their messages are saved once you open them. Attachments download when you open them.
 - **Show Older Messages** fetches mail older than 12 months from the server, 50 at a time
 - Settings → Accounts → **Appearance**: Match System, Light or Dark, or one of three softer in-between themes: **Dim** (blue-grey), **Dusk** (warm charcoal) and **Mist** (muted light grey). The themes color the folder list, message list and reading pane; emails with their own white background still show white
-- Two message list styles, switched above the list or in **View → Message List**: **Comfortable** (two-line rows with the sender, time, subject and a preview, like Apple Mail, with a Sort menu) and **Compact** (one line per message in sortable, rearrangeable columns)
+- Two message list styles, switched with the two icons above the list or in **View → Message List**: **Comfortable** (two-line rows with the sender, time, subject and a preview, like Apple Mail, with a Sort menu) and **Compact** (one line per message in sortable, rearrangeable columns, with short Outlook-style dates such as "Sat 4:53 PM"; hover over a date to see it in full)
 - **Show as Conversations** (View menu): each email's replies are tucked under the newest message of the conversation, with an arrow to show them and a count like (3), in bold if any of them are unread. Replies are matched by the emails' References header, or by subject for "Re:"/"Fwd:" emails. Works while the list is sorted by date
 - **Preview Text** (View menu, on at first): the start of each message's text in grey after its subject, like classic Outlook's AutoPreview
 - Messages are marked as read when you view them, or only after a few seconds (Settings → Accounts → Reading), so clicking past a message leaves it unread
 - **Color categories**, like classic Outlook: Categorize (toolbar or right-click) puts Red, Orange, Yellow, Green, Blue or Purple on messages, several at once if you like. They show as colored dots in the list (and a Categories column in Compact) and as named labels in the reading pane. Rename them in Settings → Accounts → Categories. They're saved on the mail server as IMAP keywords (e.g. `$CategoryRed`), so they survive reinstalls and show on other Macs running Mailroom Classic; Gmail's website and the iPhone's Mail app don't display them. The names stay on this Mac
 - Mark as read/unread, flag, categorize, delete and move all show on screen straight away, while the server catches up in the background; if the server refuses, the messages go back to how they were and the status bar says why
-- Settings → Accounts → Reading → **After deleting or moving a message**: select nothing (the default), or select the next message, like classic Outlook, so you can work through your mail pressing Delete
+- After you delete or move a message, the next one is selected, like classic Outlook, so you can work through your mail pressing Delete. It shows in the reading pane but stays unread until you click in the reading pane. Turn this off in Settings → Accounts → Reading → **After deleting or moving a message**
 - Mark as read/unread (⇧⌘U), flag (⇧⌘L), and Delete. Delete moves mail to Trash; deleting from Trash removes it for good, after asking.
 - **Edit → Undo (⌘Z)** after a delete, move or Junk puts the messages back where they were
 - Select several messages at once (⌘-click, ⇧-click) to delete, move, flag or mark them together
@@ -127,6 +128,16 @@ Microsoft only allows OAuth ("Sign in with Microsoft") for IMAP and SMTP. That m
 - If sign-in says **"Need admin approval,"** your organization blocks apps it hasn't approved. Ask IT to approve the app.
 - If reading mail works but **sending fails**, your mailbox may have *SMTP AUTH* turned off. IT can turn it on for your mailbox.
 - Some organizations turn off IMAP entirely. In that case this app can't connect.
+
+### Proton Mail
+
+Proton Mail encrypts your mail, so other apps can't read it from Proton's servers directly. Proton's free **Proton Mail Bridge** app (part of paid Proton plans) runs on your Mac, decrypts your mail, and acts as a mail server on this Mac (`127.0.0.1`) that Mailroom Classic connects to.
+
+1. Install [Proton Mail Bridge](https://proton.me/mail/bridge), sign in, and leave its connection settings at their defaults (ports 1143 and 1025, STARTTLS). Let it finish synchronizing.
+2. Trust Bridge's security certificate, which it makes itself. In Bridge, choose **Settings → Advanced settings → Export TLS certificates**, double-click the exported certificate to add it to Keychain Access, then double-click it there (it's named `127.0.0.1`), open **Trust**, and set **When using this certificate** to **Always Trust**.
+3. In Mailroom Classic's Settings, choose **Proton Mail (Bridge)**, and enter the username (your Proton address) and the **password Bridge shows under Mailbox details**, not your Proton password.
+
+Bridge must be open whenever Mailroom Classic checks or sends mail.
 
 ## Current limitations
 

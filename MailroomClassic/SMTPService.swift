@@ -8,7 +8,9 @@ enum SMTPService {
     // Connects to the account's outgoing server, logs in, sends, and disconnects.
     static func send(_ email: Email, from account: AccountSettings) async throws {
         let credential = try await MailCredential.forAccount(account)
-        let server = SMTPServer(host: account.smtpHost, port: account.smtpPort)
+        // Proton Mail Bridge needs STARTTLS on port 1025 (see IMAPService.connectAndLogIn).
+        let security: MailTransportSecurity = account.provider == .proton ? .startTLS : .automatic
+        let server = SMTPServer(host: account.smtpHost, port: account.smtpPort, transportSecurity: security)
         try await server.connect()
         do {
             switch credential {

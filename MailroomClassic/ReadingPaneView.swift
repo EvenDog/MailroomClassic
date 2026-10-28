@@ -20,6 +20,9 @@ struct ReadingPaneView: View {
     // Whether you clicked "Download Pictures" for this message. ContentView owns it
     // (and resets it for each new message) because printing needs to know too.
     @Binding var allowRemoteContent: Bool
+    // Called when you click anywhere in the pane (ContentView uses it to mark a
+    // message read). nil in a message's own window, where it isn't needed.
+    var onClickInside: (() -> Void)? = nil
 
     // How big message text is shown, in percent (100 = normal). Saved, so it stays the same next launch.
     @AppStorage("messageTextZoomPercent") private var zoomPercent = 100
@@ -38,6 +41,11 @@ struct ReadingPaneView: View {
         pane
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(appearance.colors?.reading ?? .clear)
+            .background {
+                if let onClickInside {
+                    ClickWatcher(action: onClickInside)
+                }
+            }
     }
 
     // The message, or a placeholder when none is selected.
@@ -342,6 +350,47 @@ struct ReadingPaneView: View {
                 try action(data)
             } catch {
                 attachmentError = "Couldn't open “\(attachment.filename)”: \(FriendlyError.message(for: error))"
+            }
+        }
+    }
+}
+
+// Calls `action` when you click anywhere inside the view it's put behind, even on
+// the email itself, whose web view would otherwise keep the click to itself. It
+// only watches: the click still does whatever it normally would.
+private struct ClickWatcher: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> WatchingView {
+        let view = WatchingView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ view: WatchingView, context: Context) {
+        view.action = action
+    }
+
+    final class WatchingView: NSView {
+        var action: (() -> Void)?
+        private var monitor: Any?
+
+        // Starts watching when the view appears in a window, and stops when it leaves.
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+            guard window != nil else { return }
+            // A "local monitor" sees every click in this app before it's handled.
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                // `convert(_:from: nil)` turns the click's window position into this view's own.
+                if let self, event.window == self.window,
+                   self.bounds.contains(self.convert(event.locationInWindow, from: nil)) {
+                    self.action?()
+                }
+                return event   // pass the click on, unchanged
             }
         }
     }

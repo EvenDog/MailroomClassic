@@ -389,7 +389,10 @@ enum IMAPService {
         } else {
             login = try await MailCredential.forAccount(account)
         }
-        let server = IMAPServer(host: account.imapHost, port: account.imapPort)
+        // SwiftMail can't guess the security for Proton Mail Bridge's port (1143), so say it: STARTTLS,
+        // which starts unencrypted and switches encryption on straight away.
+        let security: MailTransportSecurity = account.provider == .proton ? .startTLS : .automatic
+        let server = IMAPServer(host: account.imapHost, port: account.imapPort, transportSecurity: security)
         try await server.connect()
         do {
             switch login {

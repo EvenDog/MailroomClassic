@@ -15,6 +15,17 @@ enum FriendlyError {
         // Network-level errors come from SwiftNIO, the networking library under
         // SwiftMail. Our app doesn't import NIO directly, so we recognize them by type name.
         let typeName = String(reflecting: type(of: error))
+        // A server on this Mac is Proton Mail Bridge, which has its own usual problems.
+        let isOnThisMac = server == "127.0.0.1" || server == "localhost"
+        if isOnThisMac && typeName.contains("NIOConnectionError") {
+            return "Couldn't connect to Proton Mail Bridge. Make sure Bridge is open and signed in."
+        }
+        // `case .tlsFailed?` matches an SMTPError of that kind, whatever text it carries.
+        var isCertificateProblem = typeName.contains("NIOSSL") || typeName.contains("BoringSSL")
+        if case .tlsFailed? = error as? SMTPError { isCertificateProblem = true }
+        if isOnThisMac && isCertificateProblem {
+            return "Proton Mail Bridge's security certificate isn't trusted on this Mac yet. Trust it in Keychain Access (see the README)."
+        }
         if typeName.contains("NIOConnectionError") {
             return "Couldn't connect to \(place). Check the server name and port, and that you're online."
         }

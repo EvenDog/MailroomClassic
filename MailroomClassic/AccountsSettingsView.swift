@@ -2,7 +2,7 @@
 // check for mail, when a viewed message counts as read, the color categories' names, which senders' pictures always download,
 // whether email links open here, your accounts (with Edit and Remove), and a form to add a
 // new account or edit an existing one (including its signature). The form changes with the account
-// type: Gmail and Office 365 fill in their own server settings, and Office 365
+// type: Gmail, Office 365 and Proton Mail fill in their own server settings, and Office 365
 // signs in through Microsoft's sign-in page instead of a password. The form
 // can also be filled in from a provider's configuration profile (.mobileconfig).
 
@@ -23,7 +23,7 @@ struct AccountsSettingsView: View {
     @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.system
     @AppStorage(NewMailNotifier.settingKey) private var notifyNewMail = true
     @AppStorage(PushWatcher.settingKey) private var pushNewMail = true
-    @AppStorage(ContentView.selectNextAfterDeleteKey) private var selectNextAfterDelete = false
+    @AppStorage(ContentView.selectNextAfterDeleteKey) private var selectNextAfterDelete = true
 
     // The account being edited, or nil when the form is adding a new one.
     @State private var editingAccount: AccountSettings?
@@ -56,6 +56,7 @@ struct AccountsSettingsView: View {
         case .other: [senderName, emailAddress, imapHost] + passwordIfNeeded
         case .gmail: [senderName, emailAddress] + passwordIfNeeded
         case .office365: [senderName, emailAddress, microsoftClientID]
+        case .proton: [senderName, emailAddress] + passwordIfNeeded
         }
         return !required.contains { trimmed($0).isEmpty }
     }
@@ -120,7 +121,7 @@ struct AccountsSettingsView: View {
                     Text("Select nothing").tag(false)
                     Text("Select the next message").tag(true)
                 }
-                Text("Selecting the next message also shows it in the reading pane, so it may count as read (see above).")
+                Text("The next message shows in the reading pane but stays unread until you click in the reading pane.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -243,6 +244,11 @@ struct AccountsSettingsView: View {
                 case .office365:
                     TextField("Microsoft client ID", text: $microsoftClientID, prompt: Text("From your Azure app registration"))
                     Text("Office 365 signs in through Microsoft's own page. You need a free Azure app registration first; the README explains how. Your employer's IT may need to approve the app.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                case .proton:
+                    SecureField("Bridge password", text: $password, prompt: passwordPrompt)
+                    Text("Proton Mail works through the **Proton Mail Bridge** app, which must be open on this Mac. Use the username and password Bridge shows under Mailbox details, not your Proton password. Bridge's certificate must also be trusted in Keychain Access; the README explains how.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -383,7 +389,7 @@ struct AccountsSettingsView: View {
         isWorking = false
     }
 
-    // Builds the account from the form, using the known server settings for Gmail and Office 365.
+    // Builds the account from the form, using the known server settings for Gmail, Office 365 and Proton Mail.
     private func makeAccount() -> AccountSettings {
         let email = trimmed(emailAddress)
         let name = trimmed(displayName)
@@ -410,6 +416,10 @@ struct AccountsSettingsView: View {
             (account.imapHost, account.imapPort) = ("outlook.office365.com", 993)
             (account.smtpHost, account.smtpPort) = ("smtp.office365.com", 587)
             account.microsoftClientID = trimmed(microsoftClientID)
+        case .proton:
+            // Proton Mail Bridge's standard settings: a mail server on this Mac (127.0.0.1).
+            (account.imapHost, account.imapPort) = ("127.0.0.1", 1143)
+            (account.smtpHost, account.smtpPort) = ("127.0.0.1", 1025)
         }
         return account
     }
