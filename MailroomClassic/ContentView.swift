@@ -34,6 +34,11 @@ struct ContentView: View {
     @State private var messagesToFollowUp: [MailMessage] = []
     @State private var followUpTime = Date()
     @State private var isPickingFollowUpTime = false
+    // The message list's rows, top to bottom (it reports them), to know which message is next.
+    @State private var displayedOrder: [MailMessage.ID] = []
+    // Settings → Reading: after a delete or move, select the next message (off at first).
+    @AppStorage(Self.selectNextAfterDeleteKey) private var selectNextAfterDelete = false
+    static let selectNextAfterDeleteKey = "selectNextAfterDelete"
 
     // `@AppStorage` reads a saved setting (the Settings window writes it). 0 = check manually only.
     @AppStorage("checkIntervalMinutes") private var checkIntervalMinutes = 5
@@ -328,7 +333,7 @@ struct ContentView: View {
                 // `maxWidth: .infinity` makes each pane stretch across the whole window.
                 VSplitView {
                     messageListColumn
-                        .frame(maxWidth: .infinity, minHeight: 120)
+                        .frame(minWidth: 560, maxWidth: .infinity, minHeight: 120)
                     readingPaneColumn
                         .frame(maxWidth: .infinity, minHeight: 200)
                 }
@@ -338,7 +343,8 @@ struct ContentView: View {
                 folderSidebar
             } content: {
                 messageListColumn
-                    .navigationSplitViewColumnWidth(min: 300, ideal: 450)
+                    // `min` fits every Compact column at its narrowest (see MessageListView).
+                    .navigationSplitViewColumnWidth(min: 560, ideal: 600)
             } detail: {
                 readingPaneColumn
             }
@@ -507,7 +513,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            MessageListView(messages: shownMessages, selection: $selection,
+            MessageListView(messages: shownMessages, selection: $selection, displayedOrder: $displayedOrder,
                             folderName: folderColumnText,
                             previewText: showPreviewText ? { store.previews[$0.id] } : nil,
                             dueDate: { store.followUp(for: $0)?.dueDate },
@@ -735,9 +741,25 @@ struct ContentView: View {
         registerUndo(completedMoves, named: "Delete")
     }
 
-    // Removes messages from the selection (e.g. before they're moved away).
+    // Removes messages from the selection (e.g. before they're moved away). If
+    // that leaves nothing selected and Settings says so, selects the next message
+    // instead, like classic Outlook, so you can go through mail pressing Delete.
     private func deselect(_ messages: [MailMessage]) {
+        let next = messageShown(after: messages)   // worked out before they leave the list
         selection.subtract(messages.map(\.id))
+        if selectNextAfterDelete, selection.isEmpty, let next {
+            selection = [next]
+        }
+    }
+
+    // The first message shown below the leaving ones, or the one just above them
+    // if they were at the bottom of the list. nil if there's none.
+    private func messageShown(after leaving: [MailMessage]) -> MailMessage.ID? {
+        let leavingIDs = Set(leaving.map(\.id))
+        guard let lastLeaving = displayedOrder.lastIndex(where: { leavingIDs.contains($0) }) else { return nil }
+        // `[(lastLeaving + 1)...]` is every row below it; `[..<lastLeaving]` every row above it.
+        return displayedOrder[(lastLeaving + 1)...].first { !leavingIDs.contains($0) }
+            ?? displayedOrder[..<lastLeaving].last { !leavingIDs.contains($0) }
     }
 
     // Reloads folders and unread counts, then the open folder's message list.

@@ -23,6 +23,7 @@ struct AccountsSettingsView: View {
     @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.system
     @AppStorage(NewMailNotifier.settingKey) private var notifyNewMail = true
     @AppStorage(PushWatcher.settingKey) private var pushNewMail = true
+    @AppStorage(ContentView.selectNextAfterDeleteKey) private var selectNextAfterDelete = false
 
     // The account being edited, or nil when the form is adding a new one.
     @State private var editingAccount: AccountSettings?
@@ -114,6 +115,14 @@ struct AccountsSettingsView: View {
                     Text("After 10 seconds").tag(10)
                     Text("After 30 seconds").tag(30)
                 }
+                // Like classic Outlook's "After moving or deleting an open item".
+                Picker("After deleting or moving a message", selection: $selectNextAfterDelete) {
+                    Text("Select nothing").tag(false)
+                    Text("Select the next message").tag(true)
+                }
+                Text("Selecting the next message also shows it in the reading pane, so it may count as read (see above).")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Categories") {

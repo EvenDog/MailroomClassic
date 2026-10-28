@@ -23,6 +23,10 @@ final class MailStore {
     // preview line (View → Preview Text). Only messages whose contents are saved have one.
     private(set) var previews: [MailMessage.ID: String] = [:]
     private(set) var openMessage: OpenMessage?   // the full contents of the message in the reading pane
+    // How to unsubscribe from the open message's mailing list (see Unsubscribe), looked
+    // up after it opens. It carries the message's ID so the reading pane only shows the
+    // button on the message it belongs to, even if you've clicked on since.
+    private(set) var unsubscribeOffer: (messageID: MailMessage.ID, method: UnsubscribeMethod)?
     private(set) var statusText = "Ready"
     // The last problem checking each account (e.g. a rejected password), shown in
     // the sidebar under that account until a check works again.
@@ -602,6 +606,7 @@ final class MailStore {
     // downloaded and saved for next time.
     func open(_ message: MailMessage, in folder: MailFolder) async {
         openMessage = nil
+        unsubscribeOffer = nil
         downloadedAttachments = [:]
         guard let account = account(for: folder) else { return }
         var isShown = false
@@ -615,7 +620,9 @@ final class MailStore {
                 RecentAddresses.remember([message.sender])
             }
         }
-        guard isShown, !message.isRead else { return }
+        guard isShown else { return }
+        lookUpUnsubscribe(for: message, in: folder, account: account)
+        guard !message.isRead else { return }
 
         // Wait first, if Settings says to. Clicking another message cancels this
         // task (see ContentView), which ends the wait early, so the message stays unread.
@@ -641,6 +648,54 @@ final class MailStore {
 
     func closeMessage() {
         openMessage = nil
+        unsubscribeOffer = nil
+    }
+
+    // Finds out in the background whether the open message can be unsubscribed from,
+    // so the reading pane can show its Unsubscribe button. `Task { }` starts it without
+    // waiting, so marking the message as read isn't held up. Skipped in Junk, because
+    // unsubscribing from spam only tells the spammer your address works. Problems
+    // (e.g. being offline) are ignored: the button just doesn't appear.
+    private func lookUpUnsubscribe(for message: MailMessage, in folder: MailFolder, account: AccountSettings) {
+        guard folder.role != .junk else { return }
+        Task {
+            if let method = try? await IMAPService.fetchUnsubscribeMethod(uid: message.uid, in: folder.path, account: account) {
+                unsubscribeOffer = (messageID: message.id, method: method)
+            }
+        }
+    }
+
+    // Unsubscribes from a message's mailing list with a one-click request, or by
+    // sending the list an email from the account the message came to. (Lists that
+    // only offer a web page are opened in the browser by the reading pane instead.)
+    // The email isn't saved in Sent, since it's just a note to a machine.
+    func unsubscribe(from message: MailMessage, using method: UnsubscribeMethod) async {
+        guard let folder = folder(of: message), let account = account(for: folder) else { return }
+        let listName = message.senderDisplayName
+        var server = account.smtpHost
+        if case .oneClick(let url) = method { server = url.host() ?? server }
+        let problem = await reportingErrors("Unsubscribing from \(listName)…", server: server) {
+            switch method {
+            case .oneClick(let url):
+                try await UnsubscribeMethod.unsubscribeWithOneClick(at: url)
+            case .email(let address, let subject, let body):
+                let email = Email(
+                    sender: EmailAddress(name: account.senderName, address: account.emailAddress),
+                    recipients: [EmailAddress(address: address)],
+                    subject: subject,
+                    textBody: body
+                )
+                try await SMTPService.send(email, from: account)
+            case .webPage:
+                break
+            }
+        }
+        guard problem == nil else { return }
+        statusText = "Unsubscribed from \(listName)"
+        // Hide the button: it's done.
+        if unsubscribeOffer?.messageID == message.id {
+            unsubscribeOffer = nil
+        }
     }
 
     // A message's contents for its own window (double-click). Unlike `open`, this
@@ -700,31 +755,44 @@ final class MailStore {
 
     // MARK: - Changing mail
 
-    // Marks messages read or unread, on the server and on screen.
+    // Marks messages read or unread, on screen straight away, then on the server.
+    // (Like moves, see moveMessages: if the server refuses, the screen is put back.)
     func setRead(_ isRead: Bool, for selected: [MailMessage], in folder: MailFolder) async {
         let changing = selected.filter { $0.isRead != isRead }   // skip ones already that way
         guard let account = account(for: folder), !changing.isEmpty else { return }
-        await reportingErrors(isRead ? "Marking as read…" : "Marking as unread…", server: account.imapHost) {
+        for message in changing {
+            updateLocally(message) { $0.isRead = isRead }
+        }
+        let unreadChange = isRead ? -changing.count : changing.count
+        changeUnreadCount(of: folder, by: unreadChange)
+        let problem = await reportingErrors(isRead ? "Marking as read…" : "Marking as unread…", server: account.imapHost) {
             try await IMAPService.setFlag(.seen, to: isRead, uids: changing.map(\.uid), in: folder.path, account: account)
-            for message in changing {
-                updateLocally(message) { $0.isRead = isRead }
-            }
-            changeUnreadCount(of: folder, by: isRead ? -changing.count : changing.count)
             try? await MailCache.setFlags({ $0.isRead = isRead }, for: changing)   // the next sync corrects any failure
+        }
+        if problem != nil {
+            for message in changing {
+                updateLocally(message) { $0.isRead = message.isRead }   // `message` still holds how it was
+            }
+            changeUnreadCount(of: folder, by: -unreadChange)
         }
     }
 
-    // Flags or unflags messages, on the server and on screen. Clearing a flag also
-    // clears its follow-up date and reminder.
+    // Flags or unflags messages, on screen straight away, then on the server (put
+    // back if the server refuses). Clearing a flag also clears its follow-up date and reminder.
     func setFlagged(_ isFlagged: Bool, for selected: [MailMessage], in folder: MailFolder) async {
         guard let account = account(for: folder), !selected.isEmpty else { return }
-        await reportingErrors(isFlagged ? "Flagging…" : "Clearing flags…", server: account.imapHost) {
+        for message in selected {
+            updateLocally(message) { $0.isFlagged = isFlagged }
+        }
+        let problem = await reportingErrors(isFlagged ? "Flagging…" : "Clearing flags…", server: account.imapHost) {
             try await IMAPService.setFlag(.flagged, to: isFlagged, uids: selected.map(\.uid), in: folder.path, account: account)
-            for message in selected {
-                updateLocally(message) { $0.isFlagged = isFlagged }
-            }
             if !isFlagged { forgetFollowUps(of: selected) }
             try? await MailCache.setFlags({ $0.isFlagged = isFlagged }, for: selected)   // the next sync corrects any failure
+        }
+        if problem != nil {
+            for message in selected {
+                updateLocally(message) { $0.isFlagged = message.isFlagged }
+            }
         }
     }
 
@@ -744,14 +812,20 @@ final class MailStore {
 
     private func changeCategories(_ categories: [MailCategory], isOn: Bool, for selected: [MailMessage], in folder: MailFolder) async {
         guard let account = account(for: folder), !categories.isEmpty, !selected.isEmpty else { return }
-        await reportingErrors("Categorizing…", server: account.imapHost) {
+        // `formUnion` adds them to a message's set; `subtract` takes them out.
+        let change: @Sendable (inout Set<MailCategory>) -> Void = { isOn ? $0.formUnion(categories) : $0.subtract(categories) }
+        // On screen straight away, then the server (put back if the server refuses).
+        for message in selected {
+            updateLocally(message) { change(&$0.categories) }
+        }
+        let problem = await reportingErrors("Categorizing…", server: account.imapHost) {
             try await IMAPService.setCategories(categories, to: isOn, uids: selected.map(\.uid), in: folder.path, account: account)
-            // `formUnion` adds them to a message's set; `subtract` takes them out.
-            let change: @Sendable (inout Set<MailCategory>) -> Void = { isOn ? $0.formUnion(categories) : $0.subtract(categories) }
-            for message in selected {
-                updateLocally(message) { change(&$0.categories) }
-            }
             try? await MailCache.setFlags({ change(&$0.categories) }, for: selected)   // the next sync corrects any failure
+        }
+        if problem != nil {
+            for message in selected {
+                updateLocally(message) { $0.categories = message.categories }
+            }
         }
     }
 

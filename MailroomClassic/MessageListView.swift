@@ -68,6 +68,9 @@ struct MoveTargetGroup: Identifiable {
 struct MessageListView: View {
     let messages: [MailMessage]   // already sorted newest first by MailStore
     @Binding var selection: Set<MailMessage.ID>
+    // The list reports here which messages it shows, top to bottom, so the main
+    // window knows which one is "next" after a delete or move.
+    @Binding var displayedOrder: [MailMessage.ID]
     // Names each message's folder, for the Folder column. nil hides that column
     // (it's only shown for search results from every folder).
     let folderName: ((MailMessage) -> String)?
@@ -126,6 +129,26 @@ struct MessageListView: View {
                 jumpToMessage(startingWith: keyPress, scroll: proxy)
             }
         }
+        // `initial: true` also reports it when the list first appears.
+        .onChange(of: rowOrder, initial: true) {
+            displayedOrder = rowOrder
+        }
+    }
+
+    // Every message in the order its row appears, top to bottom: sorted, under
+    // the date headings (leaving out collapsed ones), each conversation's newest
+    // message followed by the rest of it.
+    private var rowOrder: [MailMessage.ID] {
+        if showConversations && isSortedByDate {
+            return conversationDateGroups(orderedConversations)
+                .filter { !collapsedHeadings.contains($0.title) }
+                .flatMap { $0.conversations.flatMap { $0.messages.map(\.id) } }
+        } else if isSortedByDate {
+            return dateGroups
+                .filter { !collapsedHeadings.contains($0.title) }
+                .flatMap { $0.messages.map(\.id) }
+        }
+        return sortedMessages.map(\.id)
     }
 
     // MARK: - Comfortable: two-line rows
@@ -322,7 +345,8 @@ struct MessageListView: View {
 
         // `customizationID` is the name each column's position, width and
         // visibility are saved under. `width(min:ideal:)` lets you drag a column
-        // anywhere from `min` wide to as wide as you like.
+        // anywhere from `min` wide to as wide as you like. Each `min` is the
+        // narrowest the column can be while still showing what's in it.
         return Table(of: MailMessage.self, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columnCustomization) {
             // The small columns' headers are icons, like classic Outlook's.
             // `Text(Image(…))` puts an icon where a title would go.
@@ -330,7 +354,7 @@ struct MessageListView: View {
                 Image(systemName: message.isRead ? "envelope.open" : "envelope.fill")
                     .foregroundStyle(.secondary)
             }
-            .width(min: 16, ideal: 20)
+            .width(min: 36, ideal: 36)   // room for the icon plus the date heading's indent
             .customizationID("read")
 
             TableColumn(Text(Image(systemName: "paperclip"))) { message in
@@ -347,7 +371,7 @@ struct MessageListView: View {
                 Text(message.senderDisplayName)
                     .fontWeight(message.isRead ? .regular : .bold)
             }
-            .width(min: 30, ideal: 150)
+            .width(min: 80, ideal: 150)
             .customizationID("from")
 
             TableColumn("Subject", value: \.subject) { message in
@@ -374,6 +398,7 @@ struct MessageListView: View {
                     }
                 }
             }
+            .width(min: 120, ideal: 300)
             .customizationID("subject")
 
             // `if` inside a Table's columns: the column only exists while this is true.
@@ -381,14 +406,14 @@ struct MessageListView: View {
                 TableColumn("Folder") { message in
                     Text(folderName(message))
                 }
-                .width(min: 30, ideal: 90)
+                .width(min: 60, ideal: 90)
                 .customizationID("folder")
             }
 
             TableColumn("Received", value: \.dateReceived) { message in
                 Text(message.dateReceived, format: .dateTime.month().day().hour().minute())
             }
-            .width(min: 30, ideal: 120)
+            .width(min: 115, ideal: 130)   // fits "Oct 22, 12:45 PM"
             .customizationID("received")
 
             TableColumn(Text(Image(systemName: "flag"))) { message in
@@ -406,13 +431,13 @@ struct MessageListView: View {
                     dueLabel(due)
                 }
             }
-            .width(min: 30, ideal: 100)
+            .width(min: 70, ideal: 100)
             .customizationID("due")
 
             TableColumn("Categories") { message in
                 CategoryDots(categories: message.categories)
             }
-            .width(min: 30, ideal: 70)
+            .width(min: 66, ideal: 70)   // all six dots
             .customizationID("categories")
         } rows: {
             if !conversations.isEmpty {

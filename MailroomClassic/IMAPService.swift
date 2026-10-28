@@ -228,6 +228,19 @@ enum IMAPService {
         }
     }
 
+    // How to unsubscribe from the mailing list a message came from, or nil if it
+    // doesn't say. Asks for just the two List-Unsubscribe header lines (a few
+    // hundred bytes), not the whole message. `options: []` skips everything else.
+    static func fetchUnsubscribeMethod(uid: UInt32, in folderPath: String, account: AccountSettings) async throws -> UnsubscribeMethod? {
+        try await onSpareConnection(.reading, of: account, folderPath: folderPath) { server in
+            let info = try await server.fetchMessageInfo(for: UID(uid), options: [], headerFields: UnsubscribeMethod.headerNames)
+            // SwiftMail stores header lines under lowercase names.
+            guard let listUnsubscribe = info?.additionalFields?["list-unsubscribe"] else { return nil }
+            return UnsubscribeMethod(listUnsubscribe: listUnsubscribe,
+                                     listUnsubscribePost: info?.additionalFields?["list-unsubscribe-post"])
+        }
+    }
+
     // Downloads one attachment (one part of a message) and undoes its email encoding.
     static func fetchAttachment(_ part: MessagePart, uid: UInt32, folderPath: String, account: AccountSettings) async throws -> Data {
         try await onSpareConnection(.reading, of: account, folderPath: folderPath) { server in

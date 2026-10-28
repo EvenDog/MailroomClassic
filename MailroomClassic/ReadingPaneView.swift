@@ -1,6 +1,6 @@
 // The reading pane: shows the selected message's header (subject, sender with
 // their photo from Contacts and an Add to Contacts button if they aren't there,
-// recipients, date), its attachments (each downloads when you open or save it),
+// recipients, date, and an Unsubscribe button for mailing lists), its attachments (each downloads when you open or save it),
 // and its body, either formatted (HTML) or plain text. Shows a placeholder
 // when nothing is selected. Pictures from the internet stay blocked until you
 // click Download Pictures (or Always from This Sender). The text-size buttons (⌘+ and ⌘−) make the message
@@ -28,6 +28,8 @@ struct ReadingPaneView: View {
     @State private var attachmentError: String?
     @State private var downloadingAttachmentID: MailAttachment.ID?   // shows a spinner on that button
     @State private var contactsError: String?   // if "Add to Contacts" failed
+    @State private var isConfirmingUnsubscribe = false   // shows the "Unsubscribe from…?" question
+    @Environment(\.openURL) private var openURL   // opens a web link in your browser
 
     // For the in-between themes' reading pane color (see AppAppearance).
     @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.system
@@ -87,6 +89,7 @@ struct ReadingPaneView: View {
                             .lineLimit(1)
                     }
                     addToContactsButton(for: message.sender)
+                    unsubscribeButton(for: message)
                     Spacer()
                     Text(message.dateReceived, format: .dateTime.weekday(.abbreviated).month().day().year().hour().minute())
                         .foregroundStyle(.secondary)
@@ -185,6 +188,42 @@ struct ReadingPaneView: View {
             .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
             .help("Add \(sender.name ?? sender.address) to Contacts")
+        }
+    }
+
+    // An Unsubscribe button, shown once MailStore has found that the message came from
+    // a mailing list that says how to leave it (see UnsubscribeMethod). It asks first.
+    @ViewBuilder
+    private func unsubscribeButton(for message: MailMessage) -> some View {
+        if let offer = store.unsubscribeOffer, offer.messageID == message.id {
+            Button("Unsubscribe") {
+                isConfirmingUnsubscribe = true
+            }
+            .controlSize(.small)
+            .help("Stop getting emails from this mailing list")
+            .confirmationDialog("Unsubscribe from \(message.senderDisplayName)?", isPresented: $isConfirmingUnsubscribe) {
+                if case .webPage(let url) = offer.method {
+                    Button("Open Unsubscribe Page") { openURL(url) }
+                } else {
+                    Button("Unsubscribe") {
+                        Task { await store.unsubscribe(from: message, using: offer.method) }
+                    }
+                }
+            } message: {
+                Text(unsubscribeExplanation(for: offer.method))
+            }
+        }
+    }
+
+    // What the Unsubscribe question says will happen, for each method.
+    private func unsubscribeExplanation(for method: UnsubscribeMethod) -> String {
+        switch method {
+        case .oneClick:
+            "Mailroom will tell the mailing list to stop sending you emails. It can take a few days for them to stop."
+        case .email(let address, _, _):
+            "Mailroom will send an unsubscribe email to \(address) from your account. It can take a few days for them to stop."
+        case .webPage:
+            "This list can only be left on its website. Their unsubscribe page will open in your browser."
         }
     }
 
