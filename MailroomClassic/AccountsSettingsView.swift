@@ -1,5 +1,6 @@
-// The Settings window (Mailroom Classic → Settings…, or ⌘,): how often to
-// check for mail, your accounts (with Edit and Remove), and a form to add a
+// The Settings window (Mailroom Classic → Settings…, or ⌘,): light or dark, how often to
+// check for mail, when a viewed message counts as read, the color categories' names, which senders' pictures always download,
+// whether email links open here, your accounts (with Edit and Remove), and a form to add a
 // new account or edit an existing one (including its signature). The form changes with the account
 // type: Gmail and Office 365 fill in their own server settings, and Office 365
 // signs in through Microsoft's sign-in page instead of a password. The form
@@ -17,7 +18,11 @@ struct AccountsSettingsView: View {
 
     // Saved settings (also read by the main window and NewMailNotifier).
     @AppStorage("checkIntervalMinutes") private var checkIntervalMinutes = 5
+    @AppStorage(MailStore.markAsReadDelayKey) private var markAsReadDelaySeconds = 0
+    @AppStorage(PictureSenders.storageKey) private var pictureSenders = ""
+    @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.system
     @AppStorage(NewMailNotifier.settingKey) private var notifyNewMail = true
+    @AppStorage(PushWatcher.settingKey) private var pushNewMail = true
 
     // The account being edited, or nil when the form is adding a new one.
     @State private var editingAccount: AccountSettings?
@@ -40,6 +45,8 @@ struct AccountsSettingsView: View {
     @State private var isChoosingProfile = false
     @State private var importMessage: String?      // e.g. "Filled in from profile…"
     @State private var importWarning: String?      // e.g. the server name doesn't exist
+    @State private var isDefaultEmailApp = DefaultEmailApp.isThisApp
+    @State private var defaultAppError: String?
 
     private var formIsComplete: Bool {
         // When editing, an empty password means "keep the current one".
@@ -68,7 +75,25 @@ struct AccountsSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Appearance") {
+                // A pop-up menu: six choices are too many to show side by side.
+                Picker("Appearance", selection: $appearance) {
+                    ForEach(AppAppearance.allCases, id: \.self) { choice in
+                        Text(choice.rawValue)
+                    }
+                }
+                .onChange(of: appearance) { appearance.apply() }   // switch every window straight away
+                Text("Dim, Dusk and Mist are softer, in-between looks. Emails with their own white background still show white.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Checking for Mail") {
+                Toggle("Get new mail instantly (push)", isOn: $pushNewMail)
+                    .onChange(of: pushNewMail) { store.restartPush() }   // starts or stops it straight away
+                Text("Inbox, Sent and Drafts update within seconds. Other folders update at each check below.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 Picker("Check for new mail", selection: $checkIntervalMinutes) {
                     Text("Every minute").tag(1)
                     Text("Every 5 minutes").tag(5)
@@ -78,6 +103,66 @@ struct AccountsSettingsView: View {
                     Text("Manually (Send/Receive only)").tag(0)
                 }
                 Toggle("Show a notification when new mail arrives", isOn: $notifyNewMail)
+            }
+
+            Section("Reading") {
+                // Like classic Outlook's "Mark items as read when viewed in the Reading Pane: wait N seconds".
+                Picker("Mark messages as read", selection: $markAsReadDelaySeconds) {
+                    Text("Immediately").tag(0)
+                    Text("After 3 seconds").tag(3)
+                    Text("After 5 seconds").tag(5)
+                    Text("After 10 seconds").tag(10)
+                    Text("After 30 seconds").tag(30)
+                }
+            }
+
+            Section("Categories") {
+                ForEach(MailCategory.allCases, id: \.self) { category in
+                    CategoryNameField(category: category)
+                }
+                Text("Rename the color categories (Categorize in the toolbar or right-click menu). Names are kept on this Mac; the colors are saved with your mail on the server.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Always Download Pictures From") {
+                // `pictureSenders` is the saved list itself (one address per line), so
+                // this section redraws whenever a sender is added or removed.
+                let senders = pictureSenders.split(separator: "\n").map(String.init)
+                if senders.isEmpty {
+                    Text("No senders yet. To add one, click “Always from This Sender” on the pictures bar above a message.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(senders, id: \.self) { address in
+                    HStack {
+                        Text(address)
+                        Spacer()
+                        Button("Remove") { PictureSenders.remove(address) }
+                    }
+                }
+            }
+
+            Section("Email Links") {
+                if isDefaultEmailApp {
+                    Text("Clicking an email address in another app or a website starts a new email here.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        Text("Clicking an email address in another app or a website opens a different app.")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Use Mailroom Classic") {
+                            Task {
+                                defaultAppError = await DefaultEmailApp.makeThisApp()
+                                isDefaultEmailApp = DefaultEmailApp.isThisApp
+                            }
+                        }
+                    }
+                }
+                if let defaultAppError {
+                    Text(defaultAppError)
+                        .foregroundStyle(.red)
+                }
             }
 
             Section("Accounts") {
@@ -358,5 +443,49 @@ struct AccountsSettingsView: View {
 
     private func trimmed(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// One category's name box in Settings, with its color beside it. Each category's
+// name is its own setting, and `@AppStorage` needs to know which one when it's
+// created, so each box is its own small view.
+private struct CategoryNameField: View {
+    let category: MailCategory
+    @AppStorage private var name: String
+
+    init(category: MailCategory) {
+        self.category = category
+        _name = AppStorage(wrappedValue: "", category.nameKey)   // "" means the default name
+    }
+
+    var body: some View {
+        HStack {
+            Circle()
+                .fill(category.color)
+                .frame(width: 12, height: 12)
+            TextField(category.defaultName, text: $name, prompt: Text(category.defaultName))
+                .labelsHidden()
+        }
+    }
+}
+
+// Which app opens email links (mailto:), and making it this one.
+enum DefaultEmailApp {
+    // True if macOS currently sends email links to this app.
+    static var isThisApp: Bool {
+        guard let link = URL(string: "mailto:"),
+              let handler = NSWorkspace.shared.urlForApplication(toOpen: link) else { return false }
+        return Bundle(url: handler)?.bundleIdentifier == Bundle.main.bundleIdentifier
+    }
+
+    // Asks macOS to send email links here. macOS shows its own "Do you want to
+    // change your default email app?" question first. Returns an error message, or nil if it worked.
+    static func makeThisApp() async -> String? {
+        do {
+            try await NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpenURLsWithScheme: "mailto")
+            return nil
+        } catch {
+            return "Couldn't change it: \(error.localizedDescription)"
+        }
     }
 }

@@ -1,6 +1,7 @@
 // Settings → Rules: your rules (each with Edit and Remove buttons), Run Rules
 // Now, and a form to make a new one or change one:
-// "If From / Subject / To or Cc contains ___, move it to [folder]".
+// "If From / Subject / To or Cc contains ___, move it to [folder]" (or mark it
+// as read, flag it, or delete it).
 
 import SwiftUI
 
@@ -12,6 +13,7 @@ struct RulesSettingsView: View {
     // What's chosen in the form.
     @State private var field: MailRule.Field = .sender
     @State private var text = ""
+    @State private var action: MailRule.Action = .move
     @State private var destinationFolderID: MailFolder.ID?
     @State private var isRunning = false
 
@@ -58,20 +60,17 @@ struct RulesSettingsView: View {
                     }
                 }
                 TextField("this text", text: $text, prompt: Text("e.g. Golf Genius"))
-                // Folders grouped by account. A rule only moves mail within that account.
-                Picker("Move it to", selection: $destinationFolderID) {
-                    Text("Choose a folder").tag(MailFolder.ID?.none)
-                    ForEach(store.accounts) { account in
-                        Section(account.displayName) {
-                            ForEach((store.foldersByAccount[account.id] ?? []).filter { $0.role != .inbox }) { folder in
-                                Text(folder.displayName).tag(MailFolder.ID?.some(folder.id))
-                            }
-                        }
+                Picker("Then", selection: $action) {
+                    ForEach(MailRule.Action.allCases, id: \.self) { action in
+                        Text(action.label).tag(action)
                     }
+                }
+                if action == .move {
+                    folderPicker
                 }
                 HStack {
                     Button(editingRule == nil ? "Add Rule" : "Save Changes") { saveForm() }
-                        .disabled(trimmedText.isEmpty || destinationFolderID == nil)
+                        .disabled(trimmedText.isEmpty || (action == .move && destinationFolderID == nil))
                     if editingRule != nil {
                         Button("Cancel") { clearForm() }
                     }
@@ -83,24 +82,42 @@ struct RulesSettingsView: View {
         .frame(width: 540, height: 620)
     }
 
+    // Where a Move rule sends mail: folders grouped by account. A rule only moves
+    // mail within that account.
+    private var folderPicker: some View {
+        Picker("Move it to", selection: $destinationFolderID) {
+            Text("Choose a folder").tag(MailFolder.ID?.none)
+            ForEach(store.accounts) { account in
+                Section(account.displayName) {
+                    ForEach((store.foldersByAccount[account.id] ?? []).filter { $0.role != .inbox }) { folder in
+                        Text(folder.displayName).tag(MailFolder.ID?.some(folder.id))
+                    }
+                }
+            }
+        }
+    }
+
     // Fills the form with a rule, to change it.
     private func startEditing(_ rule: MailRule) {
         editingRule = rule
         field = rule.field
         text = rule.text
+        action = rule.action
         destinationFolderID = rule.destinationFolderID
     }
 
     // Adds the form as a new rule, or saves it over the rule being edited.
     private func saveForm() {
-        guard let destinationFolderID else { return }
+        // Only Move rules keep a folder.
+        let folderID = action == .move ? destinationFolderID : nil
         if var rule = editingRule {
             rule.field = field
             rule.text = trimmedText
-            rule.destinationFolderID = destinationFolderID
+            rule.action = action
+            rule.destinationFolderID = folderID
             store.updateRule(rule)
         } else {
-            store.addRule(MailRule(field: field, text: trimmedText, destinationFolderID: destinationFolderID))
+            store.addRule(MailRule(field: field, text: trimmedText, action: action, destinationFolderID: folderID))
         }
         clearForm()
     }
@@ -110,9 +127,15 @@ struct RulesSettingsView: View {
         text = ""
     }
 
-    // e.g. "From contains “golf” → Golf (Gmail)"
+    // e.g. "From contains “golf” → Golf (Gmail)", or "Subject contains “sale” → mark as read"
     private func description(of rule: MailRule) -> String {
         let condition = "\(rule.field.label) contains “\(rule.text)”"
+        switch rule.action {
+        case .move: break
+        case .markRead: return condition + " → mark as read"
+        case .flag: return condition + " → flag"
+        case .delete: return condition + " → delete"
+        }
         guard let folder = store.allFolders.first(where: { $0.id == rule.destinationFolderID }),
               let account = store.accounts.first(where: { $0.id == folder.accountID }) else {
             return condition + " → (that folder no longer exists)"

@@ -27,6 +27,12 @@ enum AccountStorage {
     // The Keychain API is old C-style code: you describe the item you want
     // with a dictionary of `kSec...` keys, then call a SecItem function.
 
+    // Secrets already read this session, by account ID. Every mail connection
+    // needs the secret, and each Keychain read can pop up a "Mailroom wants to
+    // use your keychain" prompt, so we read it at most once per launch.
+    // It lives only in memory and is gone when the app quits.
+    private static var cachedSecrets: [UUID: String] = [:]
+
     static func saveSecret(_ secret: String, for accountID: UUID) throws {
         deleteSecret(for: accountID)   // replace any old one
         let item: [String: Any] = [
@@ -37,10 +43,13 @@ enum AccountStorage {
         ]
         let status = SecItemAdd(item as CFDictionary, nil)
         guard status == errSecSuccess else { throw KeychainError(status: status) }
+        cachedSecrets[accountID] = secret
     }
 
     // Returns the saved secret for an account, or throws if there isn't one.
+    // Only the first call per launch actually reads the Keychain.
     static func secret(for accountID: UUID) throws -> String {
+        if let cached = cachedSecrets[accountID] { return cached }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
@@ -53,10 +62,13 @@ enum AccountStorage {
         guard status == errSecSuccess, let data = result as? Data else {
             throw KeychainError(status: status)
         }
-        return String(decoding: data, as: UTF8.self)
+        let secret = String(decoding: data, as: UTF8.self)
+        cachedSecrets[accountID] = secret
+        return secret
     }
 
     static func deleteSecret(for accountID: UUID) {
+        cachedSecrets[accountID] = nil
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,

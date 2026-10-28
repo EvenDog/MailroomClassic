@@ -1,6 +1,6 @@
 // The contents of a compose window (From, To, Cc, Subject, body), plus helpers
-// that pre-fill one for Reply, Reply All and Forward, quoting the original
-// message the way classic Outlook did.
+// that pre-fill one for Reply, Reply All and Forward (quoting the original
+// message the way classic Outlook did), and for email links clicked elsewhere (mailto:).
 
 import Foundation
 
@@ -17,6 +17,10 @@ struct ComposeDraft: Codable, Hashable {
     var references: [String] = []
     var attachmentURLs: [URL] = []   // files on disk to attach
     var savedDraftUID: UInt32?       // if this draft is saved in the Drafts folder, its server ID
+    // True when an email comes back after Undo Send or a failed send: it already
+    // has its signature, and closing it should still ask whether to save it.
+    var isReopened = false
+    var sendError: String?           // why sending failed, shown when it's reopened
 }
 
 extension ComposeDraft {
@@ -70,6 +74,27 @@ extension ComposeDraft {
             htmlBody: contents.html,
             attachmentURLs: attachmentURLs,
             savedDraftUID: message.uid
+        )
+    }
+
+    // Pre-fills a new email from an email link clicked in another app or a website,
+    // e.g. "mailto:sam@example.com?subject=Hello&cc=pat@example.com&body=Hi".
+    // Returns nil if it isn't a mailto: link. (Bcc isn't supported, so it's ignored.)
+    static func fromMailtoLink(_ url: URL) -> ComposeDraft? {
+        // URLComponents splits a link into its parts and undoes %-encoding (e.g. "%20" → a space).
+        guard url.scheme?.lowercased() == "mailto",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        // The part after "?" is "name=value" pairs. Names can be in any capitals.
+        func value(_ name: String) -> String? {
+            components.queryItems?.first { $0.name.lowercased() == name }?.value
+        }
+        // "To" can be before the "?", in a "to=" pair, or both.
+        let toAddresses = [components.path, value("to") ?? ""].filter { !$0.isEmpty }
+        return ComposeDraft(
+            to: toAddresses.joined(separator: ", "),
+            cc: value("cc") ?? "",
+            subject: value("subject") ?? "",
+            body: value("body") ?? ""
         )
     }
 

@@ -123,8 +123,21 @@ final class AccountConnection {
 // busy account) gets a rest, and a wrong password doesn't get an IP address blocked.
 // Shared by all of an account's connections.
 enum LoginBackoff {
+    private struct FailureRecord: Codable {
+        var count: Int
+        var lastFailure: Date
+    }
+    private static let failuresKey = "loginFailures"
+
     // For each account: how many logins in a row have failed, and when the last one did.
-    private static var failures: [UUID: (count: Int, lastFailure: Date)] = [:]
+    // Saved in UserDefaults (as JSON) so quitting and reopening the app doesn't skip
+    // the wait. `didSet` runs every time the dictionary changes.
+    private static var failures: [UUID: FailureRecord] = {
+        guard let data = UserDefaults.standard.data(forKey: failuresKey) else { return [:] }
+        return (try? JSONDecoder().decode([UUID: FailureRecord].self, from: data)) ?? [:]
+    }() {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(failures), forKey: failuresKey) }
+    }
 
     // How long to wait after this many failures in a row. The first failure is
     // retried straight away, so one hiccup costs nothing.
@@ -146,7 +159,7 @@ enum LoginBackoff {
     }
 
     static func recordFailure(for account: AccountSettings) {
-        failures[account.id] = ((failures[account.id]?.count ?? 0) + 1, Date())
+        failures[account.id] = FailureRecord(count: (failures[account.id]?.count ?? 0) + 1, lastFailure: Date())
     }
 
     static func recordSuccess(for account: AccountSettings) {

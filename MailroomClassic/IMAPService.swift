@@ -108,7 +108,8 @@ enum IMAPService {
             }
             for info in infos {
                 guard let uid = info.uid else { continue }
-                flags[uid.value] = MessageFlags(isRead: info.flags.contains(.seen), isFlagged: info.flags.contains(.flagged))
+                flags[uid.value] = MessageFlags(isRead: info.flags.contains(.seen), isFlagged: info.flags.contains(.flagged),
+                                                categories: MailCategory.from(info.flags))
             }
         }
         return ServerFolderSnapshot(uidValidity: uidValidity, messageCount: messageCount, flags: flags)
@@ -242,11 +243,26 @@ enum IMAPService {
         }
     }
 
-    // Moves messages to another folder in the same account (also used by Delete to move them into Trash).
-    static func moveMessages(uids: [UInt32], from folderPath: String, to destinationPath: String, account: AccountSettings) async throws {
+    // Adds color categories to messages (or, with `isOn: false`, takes them off),
+    // as keywords on the server (see Categories). One request for all of them.
+    static func setCategories(_ categories: [MailCategory], to isOn: Bool, uids: [UInt32], in folderPath: String, account: AccountSettings) async throws {
         try await connection(for: account).run { server in
             try await server.selectMailbox(folderPath)
-            try await server.move(messages: uidSet(uids), to: destinationPath)
+            try await server.store(flags: categories.map { .custom($0.keyword) }, on: uidSet(uids), operation: isOn ? .add : .remove)
+        }
+    }
+
+    // Moves messages to another folder in the same account (also used by Delete to move them into Trash).
+    // Returns the IDs the messages were given in the destination folder (Undo needs them
+    // to move them back), or nil if the server didn't say. Servers with the "UIDPLUS"
+    // feature (Gmail, Office 365 and MXroute all have it) report them.
+    @discardableResult
+    static func moveMessages(uids: [UInt32], from folderPath: String, to destinationPath: String, account: AccountSettings) async throws -> [UInt32]? {
+        try await connection(for: account).run { server in
+            try await server.selectMailbox(folderPath)
+            // `CopyUID.mapping` pairs each message's old ID with its new one.
+            let copyUID = try await server.move(messages: uidSet(uids), to: destinationPath)
+            return copyUID?.mapping.map(\.destination.value)
         }
     }
 
@@ -274,6 +290,28 @@ enum IMAPService {
         try await connection(for: account).run(retryOnTimeout: false) { server in   // no retry, as in saveCopy
             let result = try await server.append(email: email, to: draftsPath, flags: [.draft, .seen])
             return result.firstUID?.value
+        }
+    }
+
+    // MARK: - Copying between accounts
+
+    // Downloads one message exactly as it's stored on the server: every header,
+    // the text and every attachment, as one block of text (the "raw" message).
+    // Used to copy a message into another account. Doesn't mark it as read.
+    static func fetchRawMessage(uid: UInt32, in folderPath: String, account: AccountSettings) async throws -> Data {
+        try await connection(for: account).run { server in
+            try await server.selectMailbox(folderPath)
+            return try await server.fetchRawMessage(identifier: UID(uid))
+        }
+    }
+
+    // Uploads a raw message (from fetchRawMessage) into a folder, with its
+    // read/flagged status and original date, so it looks the same as before.
+    static func uploadRawMessage(_ rawMessage: String, to folderPath: String, flags: [Flag], date: Date?,
+                                 account: AccountSettings) async throws {
+        // No retry: if the first try saved it but the reply was slow, a retry would save a second copy.
+        try await connection(for: account).run(retryOnTimeout: false) { server in
+            _ = try await server.append(rawMessage: rawMessage, to: folderPath, flags: flags, internalDate: date)
         }
     }
 
@@ -420,7 +458,8 @@ enum IMAPService {
             // so we can show a paperclip before downloading anything.
             hasAttachments: !Message(header: info, parts: info.parts).attachments.isEmpty,
             isRead: info.flags.contains(.seen),
-            isFlagged: info.flags.contains(.flagged)
+            isFlagged: info.flags.contains(.flagged),
+            categories: MailCategory.from(info.flags)
         )
     }
 

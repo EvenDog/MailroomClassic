@@ -134,6 +134,8 @@ struct MailFolder: Identifiable, Hashable, Codable {
     // The sidebar's "All Inboxes" row isn't a real folder, so it gets its own ID.
     // (Real folder IDs always start with an account's UUID, so they can't clash with it.)
     static let allInboxesID = "all-inboxes"
+    // The same for the Outbox: emails waiting to be sent later (see Outbox).
+    static let outboxID = "outbox"
 }
 
 // One person's email address, optionally with their name.
@@ -169,6 +171,7 @@ struct MailMessage: Identifiable {
     let hasAttachments: Bool
     var isRead: Bool
     var isFlagged: Bool
+    var categories: Set<MailCategory> = []   // its color categories (see Categories)
 
     // A UID is only unique inside one folder, so the ID includes the folder too.
     var id: String { "\(folderID)#\(uid)" }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements: permissions baked into the app's signature. The app uses the
+  "hardened runtime" (required for apps signed for download), which blocks the
+  Contacts app's data unless the app declares it needs it here. macOS still asks
+  you before the app can actually read your contacts.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.personal-information.addressbook</key>
+	<true/>
+</dict>
+</plist>

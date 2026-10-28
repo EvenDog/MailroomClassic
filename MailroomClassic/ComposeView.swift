@@ -1,9 +1,12 @@
 // The compose window, used for New Email, Reply, Reply All, Forward and editing
 // drafts: From / To / Cc / Subject fields on top, attached files under them, a
 // formatted message body below, and Send, Save Draft and Attach buttons in the
-// toolbar. The To and Cc fields suggest addresses you've used before, new
-// emails start with your signature, and closing an unsent email asks whether
-// to save it. The window closes itself once the email is sent.
+// toolbar. Files dragged onto the window are attached. The To and Cc fields
+// suggest addresses you've used before, new emails start with your signature
+// (which changes if you pick a different From account), and closing an unsent email asks whether
+// to save it. Send closes the window and hands the email to MailStore, which
+// waits a few seconds (for Undo Send) before it really goes. Send Later puts it
+// in the Outbox to go at a time you choose.
 
 import SwiftUI
 
@@ -20,6 +23,16 @@ struct ComposeView: View {
     // What the window held when it opened or was last saved, to tell whether
     // anything has changed since. Nil until the window first appears.
     @State private var savedSnapshot: Snapshot?
+    // True for an email reopened after Undo Send or a failed send: it isn't saved
+    // anywhere, so closing it asks to save even before you change anything.
+    @State private var needsSaving: Bool
+    // The signature this window put in the message, so it can be swapped when you
+    // change the From account. "" means none yet; nil means hands off (a saved or
+    // reopened draft, or you edited the signature).
+    @State private var signatureInBody: String?
+    // Send Later → Choose Date & Time…: whether its sheet is showing, and the time picked there.
+    @State private var isChoosingSendTime = false
+    @State private var chosenSendTime = Date()
 
     private struct Snapshot: Equatable {
         var accountID: UUID?
@@ -33,6 +46,8 @@ struct ComposeView: View {
     init(draft: ComposeDraft) {
         _draft = State(initialValue: draft)
         _messageText = State(initialValue: RichTextEditor.initialText(html: draft.htmlBody, plain: draft.body))
+        _errorMessage = State(initialValue: draft.sendError)
+        _needsSaving = State(initialValue: draft.isReopened)
     }
 
     private var sendingAccount: AccountSettings? {
@@ -46,7 +61,7 @@ struct ComposeView: View {
     }
 
     private var hasUnsavedChanges: Bool {
-        savedSnapshot != nil && currentSnapshot != savedSnapshot
+        savedSnapshot != nil && (needsSaving || currentSnapshot != savedSnapshot)
     }
 
     private var canSend: Bool {
@@ -90,17 +105,37 @@ struct ComposeView: View {
 
             Divider()
 
-            RichTextEditor(text: $messageText)
+            RichTextEditor(text: $messageText, onDropFiles: addAttachments)
         }
+        // Files dropped anywhere else on the window (e.g. on the To field) are attached too.
+        .dropDestination(for: URL.self) { urls, _ in
+            addAttachments(urls.filter(\.isFileURL))
+            return true
+        }
+        .onChange(of: draft.accountID) { swapSignature() }
         .frame(minWidth: 560, minHeight: 420)
         .navigationTitle(draft.subject.isEmpty ? "Untitled Message" : draft.subject)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button("Send", systemImage: "paperplane") {
-                    Task { await send() }
+                    send()
                 }
                 .help("Send (⌘Return)")
                 .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!canSend)
+            }
+            ToolbarItem(placement: .navigation) {
+                Menu("Send Later", systemImage: "clock") {
+                    ForEach(SendLaterChoice.allCases, id: \.self) { choice in
+                        Button(choice.title) { sendLater(at: choice.sendTime()) }
+                    }
+                    Divider()
+                    Button("Choose Date & Time…") {
+                        chosenSendTime = SendLaterChoice.inOneHour.sendTime()
+                        isChoosingSendTime = true
+                    }
+                }
+                .help("Send Later: the email waits in the Outbox until the time you choose")
                 .disabled(!canSend)
             }
             ToolbarItemGroup {
@@ -121,8 +156,12 @@ struct ComposeView: View {
         .fileImporter(isPresented: $isChoosingAttachments, allowedContentTypes: [.item],
                       allowsMultipleSelection: true) { result in
             if case .success(let urls) = result {
-                draft.attachmentURLs += urls
+                addAttachments(urls)
             }
+        }
+        // Send Later → Choose Date & Time…: a small sheet that slides down over the window.
+        .sheet(isPresented: $isChoosingSendTime) {
+            sendTimeSheet
         }
         .onAppear {
             guard savedSnapshot == nil else { return }   // only the first time the window appears
@@ -146,13 +185,51 @@ struct ComposeView: View {
     }
 
     // Puts the account's signature at the top of a new email, reply or forward
-    // (so in a reply it sits above the quoted original). A saved draft already has its own.
+    // (so in a reply it sits above the quoted original). A saved or reopened draft already has its own.
     private func addSignature() {
-        guard draft.savedDraftUID == nil,
-              let signature = sendingAccount?.signature, !signature.isEmpty else { return }
+        guard draft.savedDraftUID == nil, !draft.isReopened else { return }
+        let signature = sendingAccount?.signature ?? ""
+        signatureInBody = signature
+        guard !signature.isEmpty else { return }
         let withSignature = NSMutableAttributedString(string: "\n\n" + signature, attributes: RichTextEditor.defaultAttributes)
         withSignature.append(messageText)
         messageText = withSignature
+    }
+
+    // Picking a different From account swaps in that account's signature. If you've
+    // changed the signature text yourself, it's left alone.
+    private func swapSignature() {
+        guard let current = signatureInBody else { return }
+        let newSignature = sendingAccount?.signature ?? ""
+        guard newSignature != current else { return }
+        let updated = NSMutableAttributedString(attributedString: messageText)
+        let newText = NSAttributedString(string: newSignature, attributes: RichTextEditor.defaultAttributes)
+        if current.isEmpty {
+            // No signature yet: add it at the top, the way a new email starts.
+            let block = NSMutableAttributedString(string: "\n\n", attributes: RichTextEditor.defaultAttributes)
+            block.append(newText)
+            updated.insert(block, at: 0)
+        } else {
+            // `NSString.range(of:)` finds where the old signature is, as a position the text can be edited at.
+            let range = (updated.string as NSString).range(of: current)
+            guard range.location != NSNotFound else {
+                signatureInBody = nil   // you changed it: don't touch it from now on
+                return
+            }
+            updated.replaceCharacters(in: range, with: newText)
+        }
+        messageText = updated
+        signatureInBody = newSignature
+    }
+
+    // Attaches files (from Attach File or dragged in), skipping folders and files already attached.
+    private func addAttachments(_ urls: [URL]) {
+        for url in urls where !draft.attachmentURLs.contains(url) {
+            let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            if !isFolder {
+                draft.attachmentURLs.append(url)
+            }
+        }
     }
 
     // One row of buttons, one per attached file; clicking one removes it.
@@ -184,18 +261,59 @@ struct ComposeView: View {
         draft.htmlBody = RichTextEditor.html(from: messageText)
     }
 
-    private func send() async {
-        isWorking = true
+    // Hands the email to MailStore to send after the Undo Send wait, and closes the window.
+    // If it can't be sent (e.g. a mistyped address), the window stays open and says why.
+    private func send() {
         errorMessage = nil
         captureBody()
+        var sending = draft
+        sending.sendError = nil
         do {
-            try await store.send(draft)
+            try store.queueSend(sending)
+            needsSaving = false
             savedSnapshot = currentSnapshot   // sent, so closing shouldn't ask to save
             dismiss()
         } catch {
             errorMessage = "Couldn't send: \(FriendlyError.message(for: error, server: sendingAccount?.smtpHost))"
         }
-        isWorking = false
+    }
+
+    // Puts the email in the Outbox to be sent at `sendAt`, and closes the window.
+    // If it can't be sent (e.g. a mistyped address), the window stays open and says why.
+    private func sendLater(at sendAt: Date) {
+        errorMessage = nil
+        captureBody()
+        var sending = draft
+        sending.sendError = nil
+        do {
+            try store.scheduleSend(sending, at: sendAt)
+            needsSaving = false
+            savedSnapshot = currentSnapshot   // scheduled, so closing shouldn't ask to save
+            dismiss()
+        } catch {
+            errorMessage = "Couldn't schedule it: \(FriendlyError.message(for: error, server: sendingAccount?.smtpHost))"
+        }
+    }
+
+    // Choose Date & Time…: a date and time box, and Schedule.
+    private var sendTimeSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Send Later")
+                .font(.headline)
+            // `in: Date()...` means "now or later": past times can't be picked.
+            DatePicker("Send on", selection: $chosenSendTime, in: Date()..., displayedComponents: [.date, .hourAndMinute])
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { isChoosingSendTime = false }
+                Button("Schedule") {
+                    isChoosingSendTime = false
+                    sendLater(at: chosenSendTime)
+                }
+                .keyboardShortcut(.defaultAction)   // Return clicks it
+            }
+        }
+        .padding()
+        .frame(width: 340)
     }
 
     // Saves to the Drafts folder. Returns whether it worked (the close prompt needs to know).
@@ -209,6 +327,7 @@ struct ComposeView: View {
         do {
             draft.savedDraftUID = try await store.saveDraft(draft)
             draftSavedAt = Date()
+            needsSaving = false
             savedSnapshot = currentSnapshot
             return true
         } catch {

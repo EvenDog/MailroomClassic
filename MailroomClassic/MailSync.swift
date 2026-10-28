@@ -1,7 +1,7 @@
 // Keeps the local copy of each folder (MailCache) matching the server. For one
 // folder, a sync:
 //   1. asks the server which messages are inside the offline window, and each
-//      one's read/flagged status (cheap: just numbers and flags),
+//      one's read/flagged status and categories (cheap: just numbers and flags),
 //   2. compares that with what's saved (`FolderSyncPlan`): new messages,
 //      messages deleted elsewhere, and status changed elsewhere,
 //   3. applies the changes, then downloads the new messages' headers in small
@@ -25,7 +25,7 @@ nonisolated struct ServerFolderSnapshot: Sendable {
 nonisolated struct FolderSyncPlan: Equatable, Sendable {
     var startOver = false                        // renumbered: throw the saved copy away
     var removedUIDs: [UInt32] = []               // gone from the server, or now older than the window
-    var changedFlags: [UInt32: MessageFlags] = [:] // read or flagged somewhere else
+    var changedFlags: [UInt32: MessageFlags] = [:] // read, flagged or categorized somewhere else
     var newUIDs: [UInt32] = []                   // not saved yet, newest (highest UID) first
 
     // Works out the plan by comparing the saved copy with the server.

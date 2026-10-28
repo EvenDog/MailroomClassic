@@ -1,10 +1,12 @@
-// The left pane: "All Inboxes" at the top, then every account with its folders
+// The left pane: "All Inboxes" at the top (and the Outbox, while emails are
+// waiting to be sent later), then every account with its folders
 // listed underneath, like the folder tree in classic Outlook: folders inside
 // other folders (e.g. Jobs → Arrow) are nested, with an arrow to show or hide
 // them. Clicking a folder selects it, and dropping dragged messages onto a
 // folder moves them there. Each account can be collapsed to hide its folders,
 // and everything except Inbox, Drafts, Sent, Trash and Junk sits in a
 // collapsible "More Folders" group.
+// Folders with unread mail show in bold with the count after the name: "Inbox (3)".
 // Right-click a folder for New/Rename/Delete Folder, Mark All as Read and
 // Empty Trash/Junk; right-click an account's name to make a top-level folder.
 
@@ -35,14 +37,21 @@ struct FolderSidebarView: View {
     @State private var isConfirmingDelete = false
     @State private var folderToEmpty: MailFolder?
     @State private var isConfirmingEmpty = false
+    // For the in-between themes' sidebar color (see AppAppearance).
+    @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.system
 
     var body: some View {
         List(selection: $selectedFolderID) {
             if !store.accounts.isEmpty {
-                // Every account's Inbox in one list. Its badge is the total unread.
-                Label("All Inboxes", systemImage: "tray.2")
-                    .badge(store.unreadInboxCount)
+                // Every account's Inbox in one list, with the total unread after its name.
+                Label { folderTitle("All Inboxes", unread: store.unreadInboxCount) } icon: { Image(systemName: "tray.2") }
                     .tag(MailFolder.allInboxesID)
+            }
+            // Emails waiting to be sent later, with how many. Only shown while there are
+            // some (or while it's selected, so it doesn't vanish under you when the last one goes).
+            if !store.scheduledEmails.isEmpty || selectedFolderID == MailFolder.outboxID {
+                Label { folderTitle("Outbox", unread: store.scheduledEmails.count) } icon: { Image(systemName: "clock") }
+                    .tag(MailFolder.outboxID)
             }
             ForEach(store.accounts) { account in
                 // Hovering over the account's name shows an arrow that collapses or expands it.
@@ -73,13 +82,21 @@ struct FolderSidebarView: View {
                         }
                     }
                 } header: {
-                    Text(account.emailAddress)
+                    // A collapsed account shows its Inbox's unread count after its name, e.g. "me@gmail.com (3)".
+                    let unread = inboxUnreadCount(account)
+                    HStack(spacing: 4) {
+                        Text(account.emailAddress)
+                        if !isExpanded(account).wrappedValue && unread > 0 {
+                            Text("(\(unread))").fontWeight(.bold)
+                        }
+                    }
                         .contextMenu {
                             Button("New Folder…") { askForName(.create(accountID: account.id, parent: nil)) }
                         }
                 }
             }
         }
+        .themeBackground(appearance.colors?.sidebar)
         // The box that asks for a folder name. `presenting:` hands the request to the buttons.
         .alert(nameRequest?.title ?? "", isPresented: $isAskingForName, presenting: nameRequest) { request in
             TextField("Folder name", text: $typedFolderName)
@@ -116,6 +133,11 @@ struct FolderSidebarView: View {
         )
     }
 
+    // The number of unread messages in an account's Inbox (0 if its folders haven't loaded yet).
+    private func inboxUnreadCount(_ account: AccountSettings) -> Int {
+        store.foldersByAccount[account.id]?.first { $0.role == .inbox }?.unreadCount ?? 0
+    }
+
     // Whether an account's "More Folders" group is open, saved in accountsShowingMoreFolders.
     private func isShowingMoreFolders(_ account: AccountSettings) -> Binding<Bool> {
         let id = account.id.uuidString
@@ -129,9 +151,21 @@ struct FolderSidebarView: View {
         )
     }
 
+    // A folder's name, like classic Outlook: in bold with the unread count after it
+    // ("Inbox (3)") when it has unread mail, plain otherwise.
+    private func folderTitle(_ name: String, unread: Int) -> some View {
+        HStack(spacing: 4) {
+            Text(name)
+            if unread > 0 {
+                Text("(\(unread))")
+            }
+        }
+        .fontWeight(unread > 0 ? .bold : .regular)
+    }
+
     private func folderRow(_ node: FolderNode) -> some View {
-        Label(node.name, systemImage: node.folder.role.iconName)
-            .badge(node.folder.unreadCount)   // a count of 0 shows no badge
+        // `Label { } icon: { }` is the long form of Label, for a title that's more than plain text.
+        Label { folderTitle(node.name, unread: node.folder.unreadCount) } icon: { Image(systemName: node.folder.role.iconName) }
             .tag(node.folder.id)              // what gets stored when this row is selected
             // Accept messages dragged from the message list.
             .dropDestination(for: String.self) { items, _ in

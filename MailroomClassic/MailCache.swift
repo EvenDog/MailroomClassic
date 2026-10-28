@@ -20,11 +20,12 @@ enum OfflineWindow {
     }
 }
 
-// A message's read and flagged status: the part of a message that can change
-// on the server after we've saved it (e.g. you read it on your phone).
+// A message's read and flagged status and its color categories: the part of a
+// message that can change on the server after we've saved it (e.g. you read it on your phone).
 nonisolated struct MessageFlags: Equatable, Sendable {
     var isRead: Bool
     var isFlagged: Bool
+    var categories: Set<MailCategory> = []
 }
 
 // What we've saved for one folder: its numbering ID (see MailSync) and the
@@ -114,8 +115,55 @@ enum MailCache {
                                  columns: ["folderID", "uid"], onDelete: .cascade)
             }
         }
+        migrator.registerMigration("v4") { db in
+            try db.execute(sql: searchIndexSQL)
+        }
+        migrator.registerMigration("v5") { db in
+            // Each message's color categories, e.g. "blue,red" ("" for none). The next
+            // sync of each folder fills them in from the server.
+            try db.alter(table: StoredMessage.databaseTableName) { table in
+                table.add(column: "categories", .text).notNull().defaults(to: "")
+            }
+        }
         return migrator
     }
+
+    // A full-text search index ("FTS5", SQLite's built-in search engine) over every
+    // saved message's subject, sender and recipients, and text (once downloaded),
+    // so search can find words inside messages. Each index row shares its number
+    // ("rowid", a hidden number SQLite gives every row) with its message's row.
+    // "Triggers" are rules SQLite runs by itself after a change, so the index
+    // always matches: a saved, changed or removed message (or its text) updates it.
+    // The last statement fills the index from the mail already saved.
+    // ("unicode61 remove_diacritics 2" splits text into words and ignores accents,
+    // so "cafe" finds "café".) `nonisolated`: it's fixed text, so the database's
+    // background thread may read it too.
+    nonisolated private static let searchIndexSQL = """
+        CREATE VIRTUAL TABLE messageSearch USING fts5(subject, people, body, tokenize = 'unicode61 remove_diacritics 2');
+        CREATE TRIGGER messageSearch_afterMessageInsert AFTER INSERT ON message BEGIN
+            INSERT INTO messageSearch(rowid, subject, people, body)
+            VALUES (new.rowid, new.subject, new.sender || ' ' || new.toRecipients || ' ' || new.ccRecipients, '');
+        END;
+        CREATE TRIGGER messageSearch_afterMessageUpdate AFTER UPDATE OF subject, sender, toRecipients, ccRecipients ON message BEGIN
+            UPDATE messageSearch SET subject = new.subject, people = new.sender || ' ' || new.toRecipients || ' ' || new.ccRecipients
+            WHERE rowid = new.rowid;
+        END;
+        CREATE TRIGGER messageSearch_afterMessageDelete AFTER DELETE ON message BEGIN
+            DELETE FROM messageSearch WHERE rowid = old.rowid;
+        END;
+        CREATE TRIGGER messageSearch_afterBodyInsert AFTER INSERT ON messageBody BEGIN
+            UPDATE messageSearch SET body = new.plainText
+            WHERE rowid = (SELECT rowid FROM message WHERE folderID = new.folderID AND uid = new.uid);
+        END;
+        CREATE TRIGGER messageSearch_afterBodyUpdate AFTER UPDATE OF plainText ON messageBody BEGIN
+            UPDATE messageSearch SET body = new.plainText
+            WHERE rowid = (SELECT rowid FROM message WHERE folderID = new.folderID AND uid = new.uid);
+        END;
+        INSERT INTO messageSearch(rowid, subject, people, body)
+        SELECT message.rowid, message.subject, message.sender || ' ' || message.toRecipients || ' ' || message.ccRecipients,
+               COALESCE(messageBody.plainText, '')
+        FROM message LEFT JOIN messageBody ON messageBody.folderID = message.folderID AND messageBody.uid = message.uid;
+        """
 
     // MARK: - Reading
 
@@ -131,7 +179,8 @@ enum MailCache {
     }
 
     // Saved messages in these folders whose subject, sender or recipients
-    // (name or address) contain `query`, ignoring letter case; newest first.
+    // (name or address) contain `query`, ignoring letter case, or whose text
+    // contains every word of it (see fullTextQuery); newest first.
     static func search(_ query: String, inFolders folderIDs: [MailFolder.ID]) async throws -> [MailMessage] {
         // In LIKE, % means "anything" and _ means "any one character". Put a \ before any
         // the query contains, so they're matched as ordinary characters.
@@ -140,7 +189,7 @@ enum MailCache {
             .replacingOccurrences(of: "%", with: "\\%")
             .replacingOccurrences(of: "_", with: "\\_")
         // Addresses are stored as JSON, so json_extract / json_each look inside them.
-        let matches = """
+        var matches = """
             subject LIKE :pattern ESCAPE '\\'
             OR json_extract(sender, '$.name') LIKE :pattern ESCAPE '\\'
             OR json_extract(sender, '$.address') LIKE :pattern ESCAPE '\\'
@@ -149,14 +198,32 @@ enum MailCache {
             OR EXISTS (SELECT 1 FROM json_each(ccRecipients) WHERE json_extract(value, '$.name') LIKE :pattern ESCAPE '\\'
                        OR json_extract(value, '$.address') LIKE :pattern ESCAPE '\\')
             """
-        return try await database.read { db in
+        var arguments: StatementArguments = ["pattern": "%\(escaped)%"]
+        // Also look in the search index, which includes the messages' text.
+        if let words = fullTextQuery(query) {
+            matches += "\nOR message.rowid IN (SELECT rowid FROM messageSearch WHERE messageSearch MATCH :words)"
+            arguments += ["words": words]
+        }
+        return try await database.read { [matches, arguments] db in
             try StoredMessage
                 .filter(folderIDs.contains(Column("folderID")))
-                .filter(sql: matches, arguments: ["pattern": "%\(escaped)%"])
+                .filter(sql: matches, arguments: arguments)
                 .order(Column("dateReceived").desc)
                 .fetchAll(db)
                 .map(\.mailMessage)
         }
+    }
+
+    // Turns what you typed into a search of the index: every word must appear,
+    // each as the start of a word ("golf" also finds "golfing"). Each word goes
+    // in quotes so characters like - or : aren't read as search commands (a quote
+    // inside a word is doubled, which is how FTS5 writes one). Returns nil if
+    // nothing typed contains a letter or number.
+    private static func fullTextQuery(_ text: String) -> String? {
+        let words = text.split(whereSeparator: \.isWhitespace)
+            .filter { $0.contains(where: { $0.isLetter || $0.isNumber }) }
+            .map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"*" }
+        return words.isEmpty ? nil : words.joined(separator: " ")
     }
 
     // Every account's folder list from the last time it was checked, by account ID.
@@ -185,6 +252,29 @@ enum MailCache {
         }
     }
 
+    // The start of each saved message's text in these folders, squashed onto one
+    // line, by message ID (for the preview line in the message list). Messages
+    // whose contents haven't been downloaded yet are left out.
+    static func previews(inFolders folderIDs: [MailFolder.ID]) async throws -> [MailMessage.ID: String] {
+        guard !folderIDs.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: folderIDs.count).joined(separator: ",")
+        return try await database.read { db in
+            // `substr` takes just the first 300 characters, so long emails aren't read in full.
+            let rows = try Row.fetchAll(db, sql: "SELECT folderID, uid, substr(plainText, 1, 300) AS start FROM messageBody WHERE folderID IN (\(placeholders))",
+                                        arguments: StatementArguments(folderIDs))
+            var previews: [MailMessage.ID: String] = [:]
+            for row in rows {
+                let start: String = row["start"]
+                // Turn line breaks and runs of spaces into single spaces.
+                let line = start.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                guard !line.isEmpty, line != "(This message has no text.)" else { continue }
+                let folderID: String = row["folderID"], uid: Int64 = row["uid"]
+                previews["\(folderID)#\(uid)"] = line   // the same format as MailMessage.id
+            }
+            return previews
+        }
+    }
+
     // The messages in a folder whose contents aren't saved yet, newest first
     // (for downloading ahead of time).
     static func messagesWithoutBody(inFolder folderID: MailFolder.ID) async throws -> [MailMessage] {
@@ -206,10 +296,11 @@ enum MailCache {
         try await database.read { db in
             guard let state = try StoredFolderState.fetchOne(db, key: folderID) else { return nil }
             var flags: [UInt32: MessageFlags] = [:]
-            let rows = try Row.fetchAll(db, sql: "SELECT uid, isRead, isFlagged FROM message WHERE folderID = ?",
+            let rows = try Row.fetchAll(db, sql: "SELECT uid, isRead, isFlagged, categories FROM message WHERE folderID = ?",
                                         arguments: [folderID])
             for row in rows {
-                flags[UInt32(row["uid"] as Int64)] = MessageFlags(isRead: row["isRead"], isFlagged: row["isFlagged"])
+                flags[UInt32(row["uid"] as Int64)] = MessageFlags(isRead: row["isRead"], isFlagged: row["isFlagged"],
+                                                                  categories: MailCategory.categories(from: row["categories"]))
             }
             return SavedFolder(uidValidity: UInt32(state.uidValidity), flags: flags)
         }
@@ -230,8 +321,8 @@ enum MailCache {
                     .deleteAll(db)
             }
             for (uid, flags) in plan.changedFlags {
-                try db.execute(sql: "UPDATE message SET isRead = ?, isFlagged = ? WHERE folderID = ? AND uid = ?",
-                               arguments: [flags.isRead, flags.isFlagged, folderID, Int64(uid)])
+                try db.execute(sql: "UPDATE message SET isRead = ?, isFlagged = ?, categories = ? WHERE folderID = ? AND uid = ?",
+                               arguments: [flags.isRead, flags.isFlagged, MailCategory.text(for: flags.categories), folderID, Int64(uid)])
             }
             try StoredFolderState(folderID: folderID, uidValidity: Int64(uidValidity)).upsert(db)
         }
@@ -275,15 +366,16 @@ enum MailCache {
         }
     }
 
-    // Records a read/flag change you made in this app.
+    // Records a read/flag/category change you made in this app.
     static func setFlags(_ change: @escaping @Sendable (inout MessageFlags) -> Void, for messages: [MailMessage]) async throws {
-        let keys = messages.map { (folderID: $0.folderID, uid: Int64($0.uid), flags: MessageFlags(isRead: $0.isRead, isFlagged: $0.isFlagged)) }
+        let keys = messages.map { (folderID: $0.folderID, uid: Int64($0.uid),
+                                   flags: MessageFlags(isRead: $0.isRead, isFlagged: $0.isFlagged, categories: $0.categories)) }
         try await database.write { db in
             for key in keys {
                 var flags = key.flags
                 change(&flags)
-                try db.execute(sql: "UPDATE message SET isRead = ?, isFlagged = ? WHERE folderID = ? AND uid = ?",
-                               arguments: [flags.isRead, flags.isFlagged, key.folderID, key.uid])
+                try db.execute(sql: "UPDATE message SET isRead = ?, isFlagged = ?, categories = ? WHERE folderID = ? AND uid = ?",
+                               arguments: [flags.isRead, flags.isFlagged, MailCategory.text(for: flags.categories), key.folderID, key.uid])
             }
         }
     }
@@ -352,6 +444,7 @@ nonisolated struct StoredMessage: Codable, FetchableRecord, PersistableRecord, S
     var hasAttachments: Bool
     var isRead: Bool
     var isFlagged: Bool
+    var categories: String   // e.g. "blue,red" (see MailCategory.text)
 
     init(_ message: MailMessage) {
         folderID = message.folderID
@@ -367,13 +460,15 @@ nonisolated struct StoredMessage: Codable, FetchableRecord, PersistableRecord, S
         hasAttachments = message.hasAttachments
         isRead = message.isRead
         isFlagged = message.isFlagged
+        categories = MailCategory.text(for: message.categories)
     }
 
     var mailMessage: MailMessage {
         MailMessage(uid: UInt32(uid), folderID: folderID, sender: sender, replyTo: replyTo,
                     toRecipients: toRecipients, ccRecipients: ccRecipients, subject: subject,
                     dateReceived: dateReceived, messageID: messageID, references: referenceIDs,
-                    hasAttachments: hasAttachments, isRead: isRead, isFlagged: isFlagged)
+                    hasAttachments: hasAttachments, isRead: isRead, isFlagged: isFlagged,
+                    categories: MailCategory.categories(from: categories))
     }
 }
 

@@ -11,6 +11,7 @@ import WebKit
 struct HTMLMessageView: NSViewRepresentable {
     let html: String
     let allowRemoteContent: Bool
+    let zoom: Double   // 1 = normal size, 1.5 = 50% bigger
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -27,6 +28,7 @@ struct HTMLMessageView: NSViewRepresentable {
 
     // Called whenever SwiftUI redraws; only reloads if the email or the picture setting changed.
     func updateNSView(_ webView: WKWebView, context: Context) {
+        webView.pageZoom = zoom   // the same as Safari's View → Zoom In / Zoom Out
         let coordinator = context.coordinator
         guard coordinator.loadedHTML != html || coordinator.loadedAllowRemoteContent != allowRemoteContent else { return }
         coordinator.loadedHTML = html
