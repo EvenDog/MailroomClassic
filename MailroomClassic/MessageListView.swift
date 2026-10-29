@@ -364,22 +364,23 @@ struct MessageListView: View {
         // anywhere from `min` wide to as wide as you like. Each `min` is the
         // narrowest the column can be while still showing what's in it.
         return Table(of: MailMessage.self, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columnCustomization) {
-            // The small columns' headers are icons, like classic Outlook's.
-            // `Text(Image(…))` puts an icon where a title would go.
-            TableColumn(Text(Image(systemName: "envelope"))) { message in
+            // The small columns' headers are an icon plus a word. The word is also
+            // what the headers' right-click menu (show or hide columns) lists; an
+            // icon alone left a blank line there. `"\(Image(…)) Flag"` puts the icon inside the text.
+            TableColumn(Text("\(Image(systemName: "envelope")) Read")) { message in
                 Image(systemName: message.isRead ? "envelope.open" : "envelope.fill")
                     .foregroundStyle(.secondary)
             }
-            .width(min: 36, ideal: 36)   // room for the icon plus the date heading's indent
+            .width(min: 36, ideal: 64)   // at least room for the icon plus the date heading's indent
             .customizationID("read")
 
-            TableColumn(Text(Image(systemName: "paperclip"))) { message in
+            TableColumn(Text("\(Image(systemName: "paperclip")) Attachment")) { message in
                 if message.hasAttachments {
                     Image(systemName: "paperclip")
                         .foregroundStyle(.secondary)
                 }
             }
-            .width(min: 16, ideal: 16)
+            .width(min: 16, ideal: 100)   // narrower than its header cuts the word off, leaving the icon
             .customizationID("attachment")
 
             // `value:` is what clicking this column's header sorts by.
@@ -434,13 +435,13 @@ struct MessageListView: View {
             .width(min: 85, ideal: 95)   // fits "Wed 12:45 PM"
             .customizationID("received")
 
-            TableColumn(Text(Image(systemName: "flag"))) { message in
+            TableColumn(Text("\(Image(systemName: "flag")) Flag")) { message in
                 if message.isFlagged {
                     Image(systemName: "flag.fill")
                         .foregroundStyle(.red)
                 }
             }
-            .width(min: 16, ideal: 16)
+            .width(min: 16, ideal: 56)
             .customizationID("flag")
 
             // A flagged message's follow-up date (see FollowUp).

@@ -45,6 +45,14 @@ struct MailroomClassicApp: App {
             }
             // Adds the standard Format menu: Bold ⌘B, Italic ⌘I, Underline ⌘U, Show Fonts ⌘T, Show Colors.
             TextFormattingCommands()
+            // A new Mailbox menu (`CommandMenu` adds a whole menu to the menu bar).
+            CommandMenu("Mailbox") {
+                Button("Sync All Folders Now") {
+                    Task { await store.syncAllFoldersNow() }
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])   // ⇧⌘N, like Apple Mail's Get All New Mail
+                .disabled(store.accounts.isEmpty)
+            }
         }
 
         // Compose windows. Each one is opened with a ComposeDraft (blank, or a pre-filled reply).

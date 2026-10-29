@@ -174,6 +174,16 @@ final class MailStore {
         startBackgroundSync()
     }
 
+    // Mailbox → Sync All Folders Now: like Send/Receive, but the background sync
+    // then brings every folder up to date straight away, instead of only the
+    // Inboxes until the usual 30 minutes have passed. If a sync is already running,
+    // it waits for that one to finish first. `.value` waits for a Task to end.
+    func syncAllFoldersNow() async {
+        await backgroundSync?.value
+        lastFullSync = nil   // "no full sync yet", so the next one includes every folder
+        await refreshAllFolders()
+    }
+
     // Reloads one account's folders and their unread counts, and announces any new
     // mail in its Inbox. The folder list appears first; the counts then arrive one
     // folder at a time (Inbox first), each as its own small job, so opening a
