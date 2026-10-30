@@ -46,6 +46,11 @@ struct FolderSidebarView: View {
                 // Every account's Inbox in one list, with the total unread after its name.
                 Label { folderTitle("All Inboxes", unread: store.unreadInboxCount) } icon: { Image(systemName: "tray.2") }
                     .tag(MailFolder.allInboxesID)
+                // Search Folders: Unread Mail, Flagged and Has Attachments, from every account.
+                ForEach(SearchFolder.allCases, id: \.self) { searchFolder in
+                    Label(searchFolder.title, systemImage: searchFolder.systemImage)
+                        .tag(searchFolder.rawValue)
+                }
             }
             // Emails waiting to be sent later, with how many. Only shown while there are
             // some (or while it's selected, so it doesn't vanish under you when the last one goes).

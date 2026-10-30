@@ -2,10 +2,11 @@
 // this code first: it creates the shared MailStore and sets up the app's
 // windows: the main mail window, compose windows, message windows, and Settings.
 // It also asks before quitting if any email hasn't been sent, sends any email
-// still waiting out its Undo Send delay before it quits, and opens the email
-// when you click a new-mail notification.
+// still waiting out its Undo Send delay before it quits, opens the email
+// when you click a new-mail notification, and starts the updater (see Updater.swift).
 
 import AppKit
+import Sparkle
 import SwiftUI
 import UserNotifications
 
@@ -13,8 +14,13 @@ import UserNotifications
 @main
 struct MailroomClassicApp: App {
     @State private var store = MailStore()
+    // Which Settings tab is showing. Set back to General whenever Settings closes.
+    @State private var settingsTab = "General"
     // Connects AppDelegate (below), for the "unsent emails" question when quitting.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    // Sparkle's ready-made updater, with its own windows. `startingUpdater: true`
+    // starts it straight away, so it begins its regular checks for new versions.
+    private let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     var body: some Scene {
         // `Window` (rather than `WindowGroup`) means there's only ever one main window.
@@ -28,6 +34,10 @@ struct MailroomClassicApp: App {
         // opens a compose window for them (see ContentView's `.onOpenURL`).
         .handlesExternalEvents(matching: ["mailto"])
         .commands {
+            // Mailroom Classic → Check for Updates…, just under About, like most Mac apps.
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesMenuItem(updater: updaterController.updater)
+            }
             // Replace File → New Window with File → New Email (⌘N).
             CommandGroup(replacing: .newItem) {
                 NewEmailMenuItem()
@@ -36,12 +46,14 @@ struct MailroomClassicApp: App {
             CommandGroup(replacing: .printItem) {
                 PrintMenuItem()
             }
-            // View → Reading Pane → Right / Bottom, and View → Preview Text.
+            // View → Reading Pane → Right / Bottom, View → Preview Text, and View → Message Source.
             CommandGroup(after: .sidebar) {
                 ReadingPaneMenu()
                 MessageListMenu()
                 PreviewTextMenuItem()
                 ConversationsMenuItem()
+                Divider()
+                MessageSourceMenuItem()
             }
             // Adds the standard Format menu: Bold ⌘B, Italic ⌘I, Underline ⌘U, Show Fonts ⌘T, Show Colors.
             TextFormattingCommands()
@@ -76,14 +88,38 @@ struct MailroomClassicApp: App {
         // Don't reopen message windows at the next launch: the message may be gone by then.
         .restorationBehavior(.disabled)
 
-        // Settings (⌘,) has two tabs, like most Mac apps' settings windows.
+        // View → Message Source: the original email of a message, opened with its ID.
+        WindowGroup("Message Source", id: "source", for: MailMessage.ID.self) { $messageID in
+            if let messageID {
+                MessageSourceView(messageID: messageID)
+                    .environment(store)
+            }
+        }
+        .defaultSize(width: 760, height: 600)
+        .handlesExternalEvents(matching: [])
+        .restorationBehavior(.disabled)
+
+        // Settings (⌘,) has a row of tabs across the top, like most Mac apps' settings windows.
         Settings {
-            TabView {
+            // `selection` is the open tab: each tab's `.tag` is the name it's known by.
+            TabView(selection: $settingsTab) {
+                GeneralSettingsView(updater: updaterController.updater)
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                    .tag("General")
                 AccountsSettingsView()
                     .tabItem { Label("Accounts", systemImage: "person.crop.circle") }
+                    .tag("Accounts")
+                ReadingSettingsView()
+                    .tabItem { Label("Reading", systemImage: "envelope.open") }
+                    .tag("Reading")
+                CategoriesSettingsView()
+                    .tabItem { Label("Categories", systemImage: "tag") }
+                    .tag("Categories")
                 RulesSettingsView()
                     .tabItem { Label("Rules", systemImage: "line.3.horizontal.decrease.circle") }
+                    .tag("Rules")
             }
+            .onDisappear { settingsTab = "General" }   // runs when the Settings window closes
             .environment(store)
         }
     }
@@ -107,6 +143,7 @@ private struct NewEmailMenuItem: View {
 // `@Entry` is shorthand that writes the boilerplate for a new focused value.
 extension FocusedValues {
     @Entry var printMessage: PrintAction?
+    @Entry var sourceMessageID: MailMessage.ID?   // the message View → Message Source shows
 }
 
 // The print action, labelled with the message it prints. SwiftUI can't compare
@@ -131,6 +168,21 @@ private struct PrintMenuItem: View {
     }
 }
 
+// View → Message Source (⌥⌘U, as in Apple Mail): opens the selected message's
+// original email in its own window, or is greyed out if no single message is selected.
+private struct MessageSourceMenuItem: View {
+    @FocusedValue(\.sourceMessageID) private var sourceMessageID
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Message Source") {
+            if let sourceMessageID { openWindow(id: "source", value: sourceMessageID) }
+        }
+        .keyboardShortcut("u", modifiers: [.command, .option])
+        .disabled(sourceMessageID == nil)
+    }
+}
+
 // View → Reading Pane: a submenu with a checkmark next to the current choice.
 private struct ReadingPaneMenu: View {
     @AppStorage("readingPaneAtBottom") private var readingPaneAtBottom = false
@@ -143,7 +195,7 @@ private struct ReadingPaneMenu: View {
     }
 }
 
-// Settings → Accounts → Appearance: whether the app is light, dark, follows
+// Settings → General → Appearance: whether the app is light, dark, follows
 // the Mac's own setting (System Settings → Appearance), or uses one of the
 // in-between themes: Dim (soft blue-grey), Dusk (warm charcoal) or Mist (muted light grey).
 enum AppAppearance: String, CaseIterable {

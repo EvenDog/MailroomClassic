@@ -27,6 +27,8 @@ struct ContentView: View {
     @State private var searchText = ""
     @State private var allowRemoteContent = false   // "Download Pictures" clicked for the open message
     @State private var messageFilter = MessageFilter.all   // All / Unread / Flagged, above the list
+    @State private var searchFilters = SearchFilters()      // From / Date / Has attachments (see SearchFilters)
+    @State private var isShowingSearchFilters = false       // whether the filter bar is open
     @State private var searchScope = SearchScope.thisFolder   // the choice under the search box
     // A message to select as soon as it appears in the list (from a clicked notification).
     @State private var messageToSelect: MailMessage.ID?
@@ -63,11 +65,19 @@ struct ContentView: View {
         selectedFolderID == MailFolder.outboxID
     }
 
+    // The Search Folder selected in the sidebar, or nil if it's something else.
+    private var shownSearchFolder: SearchFolder? {
+        selectedFolderID.flatMap(SearchFolder.init(rawValue:))   // nil unless the ID is a Search Folder's
+    }
+
     // The real folders the message list is showing: every Inbox for All Inboxes,
-    // otherwise just the selected folder.
+    // nearly every folder for a Search Folder, otherwise just the selected folder.
     private var shownFolders: [MailFolder] {
         if isShowingAllInboxes {
             return store.allFolders.filter { $0.role == .inbox }
+        }
+        if shownSearchFolder != nil {
+            return store.allFolders.filter { SearchFolder.searches($0) }
         }
         return selectedFolder.map { [$0] } ?? []   // `.map` on an optional: [folder] if there is one, else []
     }
@@ -76,11 +86,13 @@ struct ContentView: View {
     // Selected messages always stay, so a message you're reading doesn't vanish
     // the moment it's marked read; it goes when you click another one.
     private var shownMessages: [MailMessage] {
-        switch messageFilter {
+        let messages = switch messageFilter {
         case .all: store.messages
         case .unread: store.messages.filter { !$0.isRead || selection.contains($0.id) }
         case .flagged: store.messages.filter { $0.isFlagged || selection.contains($0.id) }
         }
+        // Then the filter bar's From / Date / Has attachments, if any are set.
+        return searchFilters.isActive ? messages.filter { searchFilters.includes($0) } : messages
     }
 
     private var selectedMessages: [MailMessage] {
@@ -195,6 +207,7 @@ struct ContentView: View {
         .task(id: selectedFolderID) {
             selection = []
             searchText = ""
+            searchScope = .thisFolder   // picking a folder means looking in it
             messageFilter = .all   // each folder starts showing everything
             await loadShownFolders()
         }
@@ -215,7 +228,7 @@ struct ContentView: View {
         // (or, if you're looking at All Inboxes, add the new Inbox to it).
         .onChange(of: folderCount) {
             selectFirstInboxIfNeeded()
-            if isShowingAllInboxes {
+            if isShowingAllInboxes || shownSearchFolder != nil {
                 Task { await loadShownFolders() }
             }
         }
@@ -238,6 +251,7 @@ struct ContentView: View {
         // Hands File → Print… (⌘P) the action to run while this window is in front.
         // nil greys the menu item out.
         .focusedSceneValue(\.printMessage, canReplyOrForward ? selectedMessage.map { PrintAction(messageID: $0.id) { printMessage() } } : nil)
+        .focusedSceneValue(\.sourceMessageID, selectedMessage?.id)   // for View → Message Source
         // `presenting:` hands the waiting messages to the dialog's buttons.
         .confirmationDialog(
             messagesToDeletePermanently.count == 1
@@ -280,24 +294,34 @@ struct ContentView: View {
     // The panes, with the search box and the status bar.
     private var searchableWindow: some View {
         panes
-        .navigationTitle(isShowingAllInboxes ? "All Inboxes" : isShowingOutbox ? "Outbox" : selectedFolder?.displayName ?? "Mailroom Classic")
+        .navigationTitle(isShowingAllInboxes ? "All Inboxes" : isShowingOutbox ? "Outbox" : shownSearchFolder?.title ?? selectedFolder?.displayName ?? "Mailroom Classic")
         .navigationSubtitle(listSummary)   // the smaller line under the title
         // A search box in the toolbar. Pressing Return searches.
         .searchable(text: $searchText, placement: .toolbar, prompt: searchPrompt)
         // The choice that appears under the search box while you search: this folder, or every folder.
         .searchScopes($searchScope) {
-            Text(isShowingAllInboxes ? "All Inboxes" : "This Folder").tag(SearchScope.thisFolder)
+            Text(thisFolderScopeName).tag(SearchScope.thisFolder)
             Text("All Folders").tag(SearchScope.allFolders)
         }
-        .onSubmit(of: .search) { runSearch() }
+        .onSubmit(of: .search) {
+            isShowingSearchFilters = true   // a search shows the filters too
+            runSearch()
+        }
         // Switching between This Folder and All Folders runs the search again.
         .onChange(of: searchScope) {
             if store.isShowingSearchResults { runSearch() }
+            showListForEmptySearch()
         }
+        // Only when the filters go from none set to some set, or back, not on every keystroke.
+        .onChange(of: searchFilters.isActive) { showListForEmptySearch() }
         .onChange(of: searchText) {
             // Clearing the search box (or clicking its ✕) goes back to the normal list.
-            if searchText.isEmpty, store.isShowingSearchResults {
-                Task { await loadShownFolders() }
+            if searchText.isEmpty {
+                showListForEmptySearch()
+            }
+            // …and closes the filter bar the search opened, unless a filter is set.
+            if searchText.isEmpty, !searchFilters.isActive {
+                isShowingSearchFilters = false
             }
         }
         // A status bar along the bottom of the window, like classic Outlook.
@@ -449,9 +473,26 @@ struct ContentView: View {
         }
     }
 
+    // The name of the "this folder" choice, under the search box and in the filter bar.
+    private var thisFolderScopeName: String {
+        isShowingAllInboxes ? "All Inboxes" : shownSearchFolder?.title ?? "This Folder"
+    }
+
     private var searchPrompt: String {
         if searchScope == .allFolders { return "Search all folders" }
+        if let shownSearchFolder { return "Search \(shownSearchFolder.title)" }
         return isShowingAllInboxes ? "Search all inboxes" : "Search this folder"
+    }
+
+    // With the search box empty: the filter bar's All Folders plus a filter lists matching
+    // mail from every folder; otherwise, after a search, the list goes back to the selected folder.
+    private func showListForEmptySearch() {
+        guard searchText.isEmpty, let viewID = selectedFolderID else { return }
+        if searchScope == .allFolders && searchFilters.isActive {
+            Task { await store.showAllSavedMessages(viewID: viewID) }
+        } else if store.isShowingSearchResults {
+            Task { await loadShownFolders() }
+        }
     }
 
     // Searches the shown folder (or All Inboxes), or every folder, for what's in the search box.
@@ -462,6 +503,8 @@ struct ContentView: View {
         Task {
             if searchScope == .allFolders {
                 await store.searchAllFolders(query, viewID: viewID)
+            } else if let shownSearchFolder {
+                await store.search(query, in: shownSearchFolder, folders: shownFolders, viewID: viewID)
             } else {
                 await store.search(query, in: shownFolders, viewID: viewID)
             }
@@ -474,8 +517,7 @@ struct ContentView: View {
             Text("Sending “\(pending.draft.subject.isEmpty ? "Untitled Message" : pending.draft.subject)” in")
                 .lineLimit(1)
             // `Text(timerInterval:countsDown:)` is a built-in countdown that redraws itself every second.
-            let waitStarted = pending.sendsAt.addingTimeInterval(-MailStore.undoSendDelay)
-            Text(timerInterval: waitStarted...pending.sendsAt, countsDown: true)
+            Text(timerInterval: pending.waitStarted...pending.sendsAt, countsDown: true)
                 .monospacedDigit()
             Button("Undo") { store.undoSend(pending) }
                 .buttonStyle(.link)
@@ -540,6 +582,23 @@ struct ContentView: View {
         .accessibilityAddTraits(isChosen ? .isSelected : [])
     }
 
+    // Opens or closes the filter bar. Closing it clears the filters, so nothing stays
+    // hidden by a filter you can't see. Filled in while any filter is set.
+    private var filterBarButton: some View {
+        Button {
+            isShowingSearchFilters.toggle()
+            if !isShowingSearchFilters { searchFilters = SearchFilters() }
+        } label: {
+            Image(systemName: searchFilters.isActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                .foregroundStyle(isShowingSearchFilters ? Color.accentColor : .secondary)
+                .frame(width: 26, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isShowingSearchFilters ? "Close the filters" : "Filter by sender, date or attachments")
+        .accessibilityLabel("Filters")
+    }
+
     private var mailListColumn: some View {
         VStack(spacing: 0) {
             // `alignment: .bottom` lines the tabs' underlines up with the bar's bottom edge.
@@ -550,6 +609,7 @@ struct ContentView: View {
                 Spacer()
                 // Also in View → Message List.
                 HStack(spacing: 2) {
+                    filterBarButton
                     ForEach(MessageListDensity.allCases, id: \.self) { density in
                         densityButton(density)
                     }
@@ -561,6 +621,10 @@ struct ContentView: View {
             // A thin line under the bar. `background` (not `overlay`) puts it behind
             // the chosen tab's underline, so the blue line sits on top of it.
             .background(alignment: .bottom) { Divider() }
+            if isShowingSearchFilters {
+                SearchFilterBar(filters: $searchFilters, scope: $searchScope, thisFolderName: thisFolderScopeName)
+                Divider()
+            }
             MessageListView(messages: shownMessages, selection: $selection, displayedOrder: $displayedOrder,
                             folderName: folderColumnText,
                             previewText: showPreviewText ? { store.previews[$0.id] } : nil,
@@ -570,7 +634,13 @@ struct ContentView: View {
             }
             // `.overlay` draws on top of the (empty) list.
             .overlay {
-                if shownMessages.isEmpty && messageFilter != .all {
+                if shownMessages.isEmpty && searchFilters.isActive && !store.messages.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Messages Match the Filters", systemImage: "line.3.horizontal.decrease.circle")
+                    } actions: {
+                        Button("Clear Filters") { searchFilters = SearchFilters() }
+                    }
+                } else if shownMessages.isEmpty && messageFilter != .all {
                     ContentUnavailableView(messageFilter == .unread ? "No Unread Messages" : "No Flagged Messages",
                                            systemImage: messageFilter == .unread ? "envelope.open" : "flag")
                 }
@@ -626,15 +696,16 @@ struct ContentView: View {
             return store.scheduledEmails.count == 1 ? "1 email waiting" : "\(store.scheduledEmails.count) emails waiting"
         }
         let count = store.messages.count
-        if store.isShowingSearchResults { return "\(count.formatted()) found" }
+        if store.isShowingSearchResults || searchFilters.isActive { return "\(shownMessages.count.formatted()) found" }
         let messages = count == 1 ? "1 message" : "\(count.formatted()) messages"
         let unread = store.messages.filter { !$0.isRead }.count
         return unread == 0 ? messages : "\(messages), \(unread.formatted()) unread"
     }
 
-    // What the Folder column shows, or nil to hide it: it's only there for All Folders search results.
+    // What the Folder column shows, or nil to hide it: it's only there for All Folders
+    // search results and Search Folders, whose messages come from many folders.
     private var folderColumnText: ((MailMessage) -> String)? {
-        guard store.isShowingSearchResults && store.searchCoversAllFolders else { return nil }
+        guard (store.isShowingSearchResults && store.searchCoversAllFolders) || shownSearchFolder != nil else { return nil }
         return folderName(of:)
     }
 
@@ -831,7 +902,7 @@ struct ContentView: View {
     // Loads the message list for whatever is selected in the sidebar.
     private func loadShownFolders() async {
         guard let viewID = selectedFolderID, !shownFolders.isEmpty else { return }
-        await store.loadMessages(from: shownFolders, viewID: viewID)
+        await store.loadMessages(from: shownFolders, viewID: viewID, searchFolder: shownSearchFolder)
     }
 
     // Shows the email from a clicked new-mail notification: goes to its folder
@@ -851,13 +922,14 @@ struct ContentView: View {
     private func selectWaitingMessage() {
         guard let messageID = messageToSelect, store.messages.contains(where: { $0.id == messageID }) else { return }
         messageFilter = .all
+        searchFilters = SearchFilters()
         selection = [messageID]
         messageToSelect = nil
     }
 
     // Folders are sorted Inbox-first, so the first folder is the first account's Inbox.
     private func selectFirstInboxIfNeeded() {
-        if selectedFolderID == nil || (!isShowingAllInboxes && !isShowingOutbox && selectedFolder == nil) {
+        if selectedFolderID == nil || (!isShowingAllInboxes && !isShowingOutbox && shownSearchFolder == nil && selectedFolder == nil) {
             selectedFolderID = store.allFolders.first?.id
         }
     }

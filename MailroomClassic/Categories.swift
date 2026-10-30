@@ -33,7 +33,7 @@ nonisolated enum MailCategory: String, CaseIterable, Codable, Sendable, Comparab
         }
     }
 
-    // The setting holding this category's name (Settings → Accounts → Categories).
+    // The setting holding this category's name (Settings → Categories).
     var nameKey: String {
         "categoryName." + rawValue
     }

@@ -241,6 +241,15 @@ enum IMAPService {
         }
     }
 
+    // The whole original email exactly as the server keeps it (every header, then the
+    // body and attachments, still in their email encoding), for View → Message Source.
+    // SwiftMail fetches it with BODY.PEEK[], so it isn't marked as read.
+    static func fetchRawSource(uid: UInt32, in folderPath: String, account: AccountSettings) async throws -> Data {
+        try await onSpareConnection(.reading, of: account, folderPath: folderPath) { server in
+            try await server.fetchRawMessage(identifier: UID(uid))
+        }
+    }
+
     // Downloads one attachment (one part of a message) and undoes its email encoding.
     static func fetchAttachment(_ part: MessagePart, uid: UInt32, folderPath: String, account: AccountSettings) async throws -> Data {
         try await onSpareConnection(.reading, of: account, folderPath: folderPath) { server in

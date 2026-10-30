@@ -2,8 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Extra Info.plist entries for Mailroom Classic. Xcode merges these with the
-  ones it generates from the build settings. This one tells macOS the app can
-  open email links (mailto:), so it can be chosen as the default email app.
+  ones it generates from the build settings. CFBundleURLTypes tells macOS the app
+  can open email links (mailto:), so it can be chosen as the default email app.
+  The SU… entries set up Sparkle, the updater: where the list of versions
+  (appcast.xml, in this repo) lives, the public key that every update must be
+  signed with, and checking for updates automatically (Settings can turn it off).
 -->
 <plist version="1.0">
 <dict>
@@ -18,5 +21,11 @@
 			</array>
 		</dict>
 	</array>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/EvenDog/MailroomClassic/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>Do+Sxh/56r3VsgQWDkyk7PSH/WBi40lVAiLOpePx9Cg=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 </dict>
 </plist>

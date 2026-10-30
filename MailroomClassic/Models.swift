@@ -42,7 +42,7 @@ struct AccountSettings: Codable, Identifiable, Hashable {
     var imapPort: Int          // 993 is the standard port for secure IMAP
     var smtpHost: String       // outgoing mail server
     var smtpPort: Int          // 465 (secure from the start) or 587 (upgrades to secure)
-    var microsoftClientID: String?   // only for Office 365; see README for how to get one
+    var microsoftClientID: String?   // only for Office 365; optional, blank means use Mailroom's built-in one
     var signature: String?           // added to the bottom of emails you write, if set
 }
 
@@ -138,6 +138,46 @@ struct MailFolder: Identifiable, Hashable, Codable {
     static let allInboxesID = "all-inboxes"
     // The same for the Outbox: emails waiting to be sent later (see Outbox).
     static let outboxID = "outbox"
+}
+
+// Search Folders, like classic Outlook's: sidebar rows that gather matching mail
+// from every account's folders, read from the copy saved on this Mac (the last 12 months).
+enum SearchFolder: String, CaseIterable {
+    // Each raw value is the sidebar row's ID (like MailFolder.allInboxesID).
+    case unread = "search-unread"
+    case flagged = "search-flagged"
+    case attachments = "search-attachments"
+
+    var title: String {
+        switch self {
+        case .unread: "Unread Mail"
+        case .flagged: "Flagged"
+        case .attachments: "Has Attachments"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .unread: "envelope.badge"
+        case .flagged: "flag"
+        case .attachments: "paperclip"
+        }
+    }
+
+    // Whether a message belongs in this Search Folder.
+    func includes(_ message: MailMessage) -> Bool {
+        switch self {
+        case .unread: !message.isRead
+        case .flagged: message.isFlagged
+        case .attachments: message.hasAttachments
+        }
+    }
+
+    // Whether Search Folders look in this folder: every folder except Trash, Junk,
+    // Drafts and Gmail's All Mail (which holds a second copy of everything).
+    static func searches(_ folder: MailFolder) -> Bool {
+        ![.trash, .junk, .drafts, .allMail].contains(folder.role)
+    }
 }
 
 // One person's email address, optionally with their name.

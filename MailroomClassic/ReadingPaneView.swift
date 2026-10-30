@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ReadingPaneView: View {
     @Environment(MailStore.self) private var store
+    @Environment(\.openWindow) private var openWindow   // for starting a new email from an address
 
     // The `?` means "optional": there may be no message selected,
     // and its contents may still be downloading.
@@ -32,6 +33,7 @@ struct ReadingPaneView: View {
     @State private var downloadingAttachmentID: MailAttachment.ID?   // shows a spinner on that button
     @State private var contactsError: String?   // if "Add to Contacts" failed
     @State private var isConfirmingUnsubscribe = false   // shows the "Unsubscribe from…?" question
+    @State private var hoveredLink: LinkSafety.HoveredLink?   // the link under the mouse (see LinkSafety)
     @Environment(\.openURL) private var openURL   // opens a web link in your browser
 
     // For the in-between themes' reading pane color (see AppAppearance).
@@ -317,7 +319,7 @@ struct ReadingPaneView: View {
                             allowRemoteContent = true
                         }
                         .buttonStyle(.borderedProminent)   // filled with the accent color
-                        .help("Always load pictures in emails from \(message.sender.address). Settings → Accounts lists these senders.")
+                        .help("Always load pictures in emails from \(message.sender.address). Settings → Reading lists these senders.")
                     }
                 }
                 .font(.callout)
@@ -326,16 +328,45 @@ struct ReadingPaneView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 8)
             }
-            HTMLMessageView(html: html, allowRemoteContent: allowRemoteContent, zoom: Double(zoomPercent) / 100)
+            HTMLMessageView(html: html, allowRemoteContent: allowRemoteContent, zoom: Double(zoomPercent) / 100,
+                            hoveredLink: $hoveredLink)
+                // Where the link under the mouse really goes, in the bottom corner like Safari.
+                .overlay(alignment: .bottomLeading) {
+                    if let hoveredLink { LinkAddressBar(link: hoveredLink) }
+                }
         } else {
             ScrollView {
-                Text(openMessage.plainText)
+                Text(Self.withClickableLinks(openMessage.plainText))
                     .font(.system(size: 13 * Double(zoomPercent) / 100))   // 13 points is the normal size
                     .textSelection(.enabled)   // lets you highlight and copy the text
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
+                    // What clicking a link does: an email address starts a new email here;
+                    // anything else goes to macOS as usual (web pages open in your browser).
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let draft = ComposeDraft.fromMailtoLink(url) else { return .systemAction }
+                        openWindow(id: "compose", value: draft)
+                        return .handled
+                    })
             }
         }
+    }
+
+    // A plain-text email with its web and email addresses turned into links, which Text
+    // shows in blue and opens when clicked (web pages in your browser, email addresses
+    // as a new email). `NSDataDetector` is Apple's built-in finder of addresses in text.
+    private static func withClickableLinks(_ text: String) -> AttributedString {
+        var result = AttributedString(text)
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return result }
+        for match in detector.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            // Turn the match's position in the plain text into the same stretch of `result`.
+            guard let url = match.url,
+                  let textRange = Range(match.range, in: text),
+                  let start = AttributedString.Index(textRange.lowerBound, within: result),
+                  let end = AttributedString.Index(textRange.upperBound, within: result) else { continue }
+            result[start..<end].link = url
+        }
+        return result
     }
 
     // Downloads an attachment, then does something with the file (open or save it).

@@ -38,9 +38,10 @@ final class MailStore {
     private(set) var searchCoversAllFolders = false   // the results come from every folder (so show a Folder column)
     private var activeSearch: String?   // the search being shown, so a slow server reply for an old one is ignored
 
-    // Which sidebar row (a folder, or All Inboxes) `messages` shows, and the real folders behind it.
+    // Which sidebar row (a folder, All Inboxes or a Search Folder) `messages` shows, and the real folders behind it.
     private var shownFolderID: String?
     private var shownFolders: [MailFolder] = []
+    private var shownSearchFolder: SearchFolder?   // set while a Search Folder is shown
     // Messages older than the offline window, fetched from the server with
     // "Show Older Messages" (they aren't saved on this Mac), and how many more
     // older ones each shown folder still has on the server.
@@ -72,7 +73,7 @@ final class MailStore {
 
     // True when the server has messages older than the ones on screen.
     var hasOlderMessages: Bool {
-        !isShowingSearchResults && olderRemainingByFolder.values.contains { $0 > 0 }
+        !isShowingSearchResults && shownSearchFolder == nil && olderRemainingByFolder.values.contains { $0 > 0 }
     }
 
     // Every folder from every account, in one list.
@@ -305,7 +306,8 @@ final class MailStore {
     // (several folders means All Inboxes). They appear straight away from the
     // local copy, then each folder is synced with the server and the list updates.
     // `viewID` is the sidebar row being shown (a folder's ID, or MailFolder.allInboxesID).
-    func loadMessages(from folders: [MailFolder], viewID: String) async {
+    // For a Search Folder, only its matching messages are shown.
+    func loadMessages(from folders: [MailFolder], viewID: String, searchFolder: SearchFolder? = nil) async {
         if shownFolderID != viewID {
             messages = []
             olderMessages = []
@@ -313,10 +315,15 @@ final class MailStore {
         }
         shownFolderID = viewID
         shownFolders = folders
+        shownSearchFolder = searchFolder
         isShowingSearchResults = false
         searchCoversAllFolders = false
         activeSearch = nil
         await showSavedMessages()
+        // A Search Folder isn't synced when opened: that would be a server request for
+        // nearly every folder, and Gmail slows down accounts that make lots of requests.
+        // The regular checks and push keep the saved copy it reads up to date.
+        guard searchFolder == nil else { return }
         for folder in folders {
             await sync(folder)
         }
@@ -346,7 +353,15 @@ final class MailStore {
     private func showSavedMessages() async {
         guard let viewID = shownFolderID else { return }
         do {
-            let saved = try await MailCache.messages(inFolders: shownFolders.map(\.id))
+            let saved: [MailMessage]
+            if let shownSearchFolder {
+                // Messages already listed stay while they're still saved (see MailCache), and an
+                // email Gmail keeps under several labels shows once.
+                saved = withoutGmailDuplicates(try await MailCache.messages(
+                    for: shownSearchFolder, inFolders: shownFolders.map(\.id), keeping: messages.map(\.id)))
+            } else {
+                saved = try await MailCache.messages(inFolders: shownFolders.map(\.id))
+            }
             guard shownFolderID == viewID, !isShowingSearchResults else { return }   // you moved on meanwhile
             messages = (saved + olderMessages).sorted { $0.dateReceived > $1.dateReceived }
         } catch {
@@ -539,6 +554,18 @@ final class MailStore {
         }
     }
 
+    // Searching inside a Search Folder: its saved messages that match `query`. Like
+    // All Folders below, only the copy on this Mac is searched, not the servers.
+    func search(_ query: String, in searchFolder: SearchFolder, folders: [MailFolder], viewID: String) async {
+        activeSearch = query
+        searchCoversAllFolders = false
+        guard let saved = try? await MailCache.search(query, inFolders: folders.map(\.id)),
+              shownFolderID == viewID, activeSearch == query else { return }
+        messages = withoutGmailDuplicates(saved.filter(searchFolder.includes))
+        isShowingSearchResults = true
+        statusText = messages.count == 1 ? "1 message found" : "\(messages.count) messages found"
+    }
+
     // Search → All Folders: every folder of every account, from the copy saved on
     // this Mac (the last 12 months; sender, recipients and subject). The servers
     // aren't asked: that would be one request per folder, dozens in all, and Gmail
@@ -551,6 +578,18 @@ final class MailStore {
         isShowingSearchResults = true
         searchCoversAllFolders = true
         statusText = messages.count == 1 ? "1 message found in all folders" : "\(messages.count) messages found in all folders"
+    }
+
+    // The filter bar's All Folders with the search box empty: every message saved on this
+    // Mac (the last 12 months, all folders, each Gmail email once). The filters then pick
+    // out the matches. Like All Folders search, the servers aren't asked.
+    func showAllSavedMessages(viewID: String) async {
+        activeSearch = ""   // not a typed search, but a slower one still running is now out of date
+        guard let saved = try? await MailCache.messages(inFolders: allFolders.map(\.id)),
+              shownFolderID == viewID, activeSearch == "" else { return }
+        messages = withoutGmailDuplicates(saved)
+        isShowingSearchResults = true
+        searchCoversAllFolders = true   // shows the Folder column
     }
 
     // Gmail's All Mail holds a second copy of every message that's also in another
@@ -608,6 +647,21 @@ final class MailStore {
     // The folder a message is in, e.g. to know which account to ask about it.
     func folder(of message: MailMessage) -> MailFolder? {
         allFolders.first { $0.id == message.folderID }
+    }
+
+    // View → Message Source: the original email behind a message ID, as text.
+    func rawSource(ofMessageID messageID: MailMessage.ID) async throws -> String {
+        // A message ID is "folderID#uid" (see MailMessage.id), so split it at the last "#".
+        guard let hash = messageID.lastIndex(of: "#"),
+              let uid = UInt32(messageID[messageID.index(after: hash)...]),
+              let folder = allFolders.first(where: { $0.id == String(messageID[..<hash]) }),
+              let account = account(for: folder) else {
+            throw MailError(message: "This message isn't available any more.")
+        }
+        let data = try await IMAPService.fetchRawSource(uid: uid, in: folder.path, account: account)
+        // Emails are almost always UTF-8 (or plain ASCII, which is the same). Latin-1 can
+        // read any bytes at all, so it's the fallback for the rare email that isn't.
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
     }
 
     // Shows a whole message (text, HTML, list of attachments), then marks it as read,
@@ -1009,8 +1063,13 @@ final class MailStore {
 
     // MARK: - Sending (with Undo Send)
 
-    // How long a sent email waits before it really goes, so you can still take it back.
-    static let undoSendDelay: TimeInterval = 10
+    // How long a sent email waits before it really goes, so you can still take it back
+    // (Settings → General → Undo Send). 0 means Off: it goes straight away.
+    static let undoSendDelayKey = "undoSendDelaySeconds"
+    static var undoSendDelay: Int {
+        // `object(forKey:)` is nil until the setting is first changed, so the default (10) applies.
+        UserDefaults.standard.object(forKey: undoSendDelayKey) as? Int ?? 10
+    }
 
     // Emails waiting out that delay (the status bar shows the newest, with Undo).
     private(set) var pendingSends: [PendingSend] = []
@@ -1027,10 +1086,11 @@ final class MailStore {
         let account = try sendingAccount(for: draft)
         _ = try makeEmail(from: draft, account: account)   // only to check the addresses now
 
-        let pending = PendingSend(draft: draft, sendsAt: Date().addingTimeInterval(Self.undoSendDelay))
+        let delay = Self.undoSendDelay
+        let pending = PendingSend(draft: draft, sendsAt: Date().addingTimeInterval(TimeInterval(delay)))
         pendingSends.append(pending)
         pending.timer = Task {
-            try? await Task.sleep(for: .seconds(Self.undoSendDelay))
+            try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }   // Undo was clicked
             await sendNow(pending)
         }
@@ -1473,6 +1533,7 @@ struct CompletedMove {
 final class PendingSend: Identifiable {
     let id = UUID()
     let draft: ComposeDraft
+    let waitStarted = Date()   // when Send was clicked (for the status bar's countdown)
     let sendsAt: Date
     var timer: Task<Void, Never>?   // the wait; cancelling it stops the send
 

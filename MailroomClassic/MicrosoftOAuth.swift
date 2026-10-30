@@ -14,6 +14,11 @@ enum MicrosoftOAuth {
     static let redirectURI = "mailroomclassic://oauth"
     private static let callbackScheme = "mailroomclassic"
 
+    // Mailroom Classic's own Azure app registration, used when an account doesn't
+    // supply its own client ID. It's not a secret: desktop apps can't keep one,
+    // so Microsoft treats this kind of ID as public (Thunderbird publishes theirs too).
+    private static let builtInClientID = "210d788e-c727-4d18-a5fe-c05324e342a1"
+
     // What the app asks permission for: read mail over IMAP, send over SMTP,
     // and "offline_access", which is what makes Microsoft hand out a refresh token.
     private static let scopes = "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access"
@@ -28,7 +33,7 @@ enum MicrosoftOAuth {
     // Shows Microsoft's sign-in page in a secure popup. Returns the refresh
     // token, which the caller saves to the Keychain.
     static func signIn(account: AccountSettings, using session: WebAuthenticationSession) async throws -> String {
-        let clientID = try requireClientID(account)
+        let clientID = clientIDToUse(for: account)
         let codeVerifier = randomURLSafeString()   // the PKCE secret
         let state = randomURLSafeString()          // checked on return, to make sure the reply is for us
 
@@ -83,7 +88,7 @@ enum MicrosoftOAuth {
             return cached.token
         }
         let tokens = try await requestTokens([
-            "client_id": try requireClientID(account),
+            "client_id": clientIDToUse(for: account),
             "grant_type": "refresh_token",
             "refresh_token": try AccountStorage.secret(for: account.id),
             "scope": scopes,
@@ -101,9 +106,10 @@ enum MicrosoftOAuth {
 
     // MARK: - Helpers
 
-    private static func requireClientID(_ account: AccountSettings) throws -> String {
+    // The account's own client ID if it has one, otherwise Mailroom's built-in one.
+    private static func clientIDToUse(for account: AccountSettings) -> String {
         guard let clientID = account.microsoftClientID, !clientID.isEmpty else {
-            throw MailError(message: "This account has no Microsoft client ID. See the README for how to get one.")
+            return builtInClientID
         }
         return clientID
     }

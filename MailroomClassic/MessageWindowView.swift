@@ -57,6 +57,7 @@ struct MessageWindowView: View {
         }
         // Lets File → Print… (⌘P) print this message while this window is in front.
         .focusedSceneValue(\.printMessage, contents == nil ? nil : message.map { PrintAction(messageID: $0.id) { printMessage() } })
+        .focusedSceneValue(\.sourceMessageID, message?.id)   // for View → Message Source
         .task {
             // The main window's list has the message right now (you just double-clicked it).
             guard let found = store.messages.first(where: { $0.id == messageID }) else {

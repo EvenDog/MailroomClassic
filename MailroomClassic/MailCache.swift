@@ -178,6 +178,27 @@ enum MailCache {
         }
     }
 
+    // The saved messages for a Search Folder, newest first: the ones in these folders
+    // that belong in it, plus any of `keptIDs` that are still saved (so an email you've
+    // just read doesn't vanish from Unread Mail while you're looking at it).
+    static func messages(for searchFolder: SearchFolder, inFolders folderIDs: [MailFolder.ID],
+                         keeping keptIDs: [MailMessage.ID]) async throws -> [MailMessage] {
+        let belongs = switch searchFolder {
+        case .unread: Column("isRead") == false
+        case .flagged: Column("isFlagged") == true
+        case .attachments: Column("hasAttachments") == true
+        }
+        // Builds each row's message ID in SQL, the same way MailMessage.id does ("folderID#uid").
+        let rowMessageID = SQL(sql: "folderID || '#' || uid").sqlExpression
+        return try await database.read { db in
+            try StoredMessage
+                .filter((folderIDs.contains(Column("folderID")) && belongs) || keptIDs.contains(rowMessageID))
+                .order(Column("dateReceived").desc)
+                .fetchAll(db)
+                .map(\.mailMessage)
+        }
+    }
+
     // Saved messages in these folders whose subject, sender or recipients
     // (name or address) contain `query`, ignoring letter case, or whose text
     // contains every word of it (see fullTextQuery); newest first.
